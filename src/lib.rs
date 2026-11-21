@@ -8,13 +8,16 @@
 //!   fixed-base strong probable prime test for the extended `u128` profile.
 //! * [`factor`] — factorization pipeline: small-prime trial division,
 //!   primality screening and Pollard's rho with Brent's cycle detection.
+//! * [`cubic`] — cubic and elliptic curve discovery, classification,
+//!   point arithmetic and modular factorization probing.
 //! * [`cli`] — command line interface (`--json`, `--matrix`,
-//!   `--quadruplets <K>`, arguments and stdin).
+//!   `--quadruplets <K>`, arguments, stdin and `cubic` subcommands).
 //!
 //! All arithmetic is overflow safe: `u64` moduli use native `u128`
 //! multiplications, `u128` moduli use overflow-free multiply-and-add.
 
 pub mod cli;
+pub mod cubic;
 pub mod factor;
 pub mod matrix;
 pub mod primality;

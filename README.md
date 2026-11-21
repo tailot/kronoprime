@@ -133,6 +133,13 @@ cargo build --release
 cat numbers.txt | ./target/release/kronoprime --matrix
 ./target/release/kronoprime --json 104729
 ./target/release/kronoprime --quadruplets 5
+
+# Cubic & Elliptic Curves subcommands:
+./target/release/kronoprime cubic scan --modulus 1019 --limit 3 --class cm --format table
+./target/release/kronoprime cubic from-matrix --matrix "[12,5,7; 3,19,2; 8,1,30]" --modulus 1009 --format json
+./target/release/kronoprime cubic verify --a 0 --b 5 --modulus 1019 --points 3 --format table
+./target/release/kronoprime cubic factor-probe --modulus 2021027 --limit 50 --format json
+./target/release/kronoprime cubic point-ops --a 0 --b 5 --modulus 1019 --point "12,431" --scalar 1020 --format table
 ```
 
 Standard output:
@@ -164,12 +171,13 @@ Flags: `--json`, `--matrix`, `--quadruplets <K>` (or `--quadruplets=<K>`, max 10
 ```text
 src/
   main.rs        entry point
-  cli.rs         argument parsing, stdin, text/JSON reports
-  matrix.rs      3x3 grid, slots, mod-10 compatibility, mod-3003 wheel
+  cli.rs         argument parsing, stdin, text/JSON reports, cubic subcommands
+  matrix.rs      3x3 grid, slots, mod-10 compatibility, mod-3003 wheel, matrix invariants & Tschirnhaus
   primality.rs   Miller-Rabin + overflow-safe modular arithmetic (u128)
-  factor.rs      trial division, Pollard-Brent, worklist
+  factor.rs      trial division, Pollard-Brent, worklist, cubic factor probe
+  cubic.rs       cubic & elliptic curve discovery, classification, point operations, Tonelli-Shanks
 tests/
-  integration.rs end-to-end invariants (factor product, slots, timing)
+  integration.rs end-to-end invariants (factor product, slots, timing, cubic & matrix validation)
 ```
 
 - **No panics on extreme inputs**: overflow-free arithmetic (`add_mod`/`mul_mod` with a native `u128` path below 2^64 and multiply-and-add above it), edge cases covered (`0`, `1`, `u64::MAX`, Mersenne numbers, Carmichael numbers, prime powers).
