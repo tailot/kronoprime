@@ -1,0 +1,11 @@
+[package]
+name = "kronoprime"
+version = "0.0.1"
+edition = "2021"
+description = "Large-number analysis and factorization engine with 3x3 decade matrices, Miller-Rabin and Pollard-Brent"
+
+[dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
