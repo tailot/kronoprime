@@ -190,6 +190,119 @@ Quadruplet: Matrix N=149 -> [1481, 1483, 1487, 1489]
 
 Flags: `--json`, `--matrix`, `--quadruplets <K>` (or `--quadruplets=<K>`, max 100000), `-h/--help`, `--version`. Valid inputs: integers in `0..=u128::MAX`; non-numeric or out-of-range inputs are reported on stderr (exit code 1). The `cubic` subcommands use the same flags and accept values up to 4096 bits, decimal or `0x` hexadecimal; their exit codes are width-independent (`2` when `factor-probe` finds a factor, `1` when a `verify` certification fails, `0` otherwise).
 
+## Six worked examples
+
+Run from Linux as `./target/release/kronoprime` (on Windows the same commands carry the `.exe` suffix). Every output below is a real capture, followed by what it actually says.
+
+### 1. The classic Carmichael trap
+
+```sh
+./target/release/kronoprime 561
+```
+
+```text
+Input: 561
+Status: COMPOSITE
+Matrix N: 57 | Slot: +1
+Factors: [3, 11, 17]
+Elapsed: 0.01 ms
+```
+
+561 is the smallest Carmichael number: it *looks* prime to any Fermat-style probabilistic test, because `b^560 = 1 (mod 561)` for every `b` coprime to it - it passes many probable-prime tests yet is composite. Deterministic Miller-Rabin is exactly what cannot be fooled: `Status: COMPOSITE`, no maybe about it. The placement `Matrix N: 57 | Slot: +1` puts it in the decade 561..569, first active cell, and stage 1 trial division (3 divides it) hands back the full factorization `3 * 11 * 17` in a hundredth of a millisecond.
+
+### 2. The 3x3 grid in high definition
+
+```sh
+./target/release/kronoprime --matrix 104729
+```
+
+```text
+Input: 104729
+Status: PRIME
+Matrix N: 10473 | Slot: +9
+Factors: [104729]
+Elapsed: 0.00 ms
+3x3 grid for Matrix N=10473 (104721..104729):
+104721  104722  104723* 
+104724  104725  104726  
+104727  104728  104729* 
+Active slots: +1=104721 composite +3=104723 prime +7=104727 composite +9=104729 prime (input)
+```
+
+104729 is the 10,000th prime, and `--matrix` prints the whole decade it lives in: the cells `104721..104729` laid out as the actual 3x3 grid, with prime cells starred. So the grid answers "where does a prime land?" (row 0, column 2, slot `+9`) and "which cells of this decade are alive?" at a glance: only two of the four active slots are prime here (`+3` = 104723 and `+9` = 104729), while `+1` (divisible by 3) and `+7` are dead. The `(input)` tag marks the queried cell.
+
+### 3. Hunting the first 5 prime quadruplets
+
+```sh
+./target/release/kronoprime --quadruplets 5
+```
+
+```text
+Quadruplet: Matrix N=2 -> [11, 13, 17, 19]
+Quadruplet: Matrix N=11 -> [101, 103, 107, 109]
+Quadruplet: Matrix N=20 -> [191, 193, 197, 199]
+Quadruplet: Matrix N=83 -> [821, 823, 827, 829]
+Quadruplet: Matrix N=149 -> [1481, 1483, 1487, 1489]
+Searched with the mod-3003 wheel in 0.01 ms
+```
+
+A quadruplet `(p, p+2, p+6, p+8)` is exactly a decade whose four active slots `{+1, +3, +7, +9}` are all prime, and the five lines are the first five such decades: N=2 (the only one where the wheel primes 11 and 13 fall inside the window), then N=11, 20, 83, 149. The closing line is the point of the whole grid design: the mod-3003 wheel pre-filter skipped ~93.7% of the decades before any primality test ran, so the hunt cost 0.01 ms.
+
+### 4. The semiprime in ~80 ms: two large primes meet
+
+```sh
+./target/release/kronoprime 100000000520000000627
+```
+
+```text
+Input: 100000000520000000627
+Status: COMPOSITE (large prime factors)
+Matrix N: 10000000052000000063 | Slot: +7
+Factors: [10000000019, 10000000033]
+Elapsed: 25.20 ms
+```
+
+A 21-digit semiprime: neither factor (both 11-digit primes) is reachable by the trial-division cap, so Miller-Rabin certifies compositeness - `COMPOSITE (large prime factors)` - and Pollard-Brent does the splitting in tens of milliseconds (machine-dependent; the table above measured ~80 ms on a Windows desktop, this capture 25 ms). The slot line even self-validates: the factors sit in slots +9 and +3, and `9 * 3 = 27` ends in 7 - exactly the reported `Slot: +7`, the mod-10 product rule checked for free.
+
+### 5. "Cracking" a composite on the fly with the discriminant GCD
+
+```sh
+./target/release/kronoprime cubic factor-probe --modulus 2021027 --limit 50 --format json
+```
+
+```json
+{
+  "status": "FactorFound",
+  "modulus": 2021027,
+  "factor1": 1009,
+  "factor2": 2003,
+  "source_curve": { "a": 200300, "b": 200300 },
+  "mechanism": "DiscriminantGcd"
+}
+```
+
+Here the composite is fed to the *curve* layer as a modulus. Before any heavy machinery, the probe computes the discriminant of the constructed cubic `y^2 = x^3 + ax + b` modulo `n` and takes a `gcd` against `n`: one of the seeds hits a non-invertible denominator and the gcd leaks a factor. The JSON says which curve did it - `source_curve: (a, b) = (200300, 200300)`, mechanism `DiscriminantGcd` - and the modulus splits: `2021027 = 1009 * 2003`. Exit code `2` signals "factor found", so scripts can branch on it without parsing the JSON.
+
+### 6. Automatic lane switch to the 4096-bit profile
+
+```sh
+./target/release/kronoprime cubic verify --a 0 --b 5 --modulus 0x3FB --points 2 --format table
+```
+
+```text
+Verifica Ordine Curva: y^2 = x^3 + 5 mod 1019 (Classe: CmSupersingular I)
+Ordine teorico atteso: 1020
++---------+--------------+--------------+--------+
+| Punto # | Coordinata X | Coordinata Y | Esito  |
++---------+--------------+--------------+--------+
+| 1       | 0            | 987          | PASSED |
+| 2       | 0            | 32           | PASSED |
++---------+--------------+--------------+--------+
+Esito Globale: CERTIFICATO (2/2 punti soddisfano [1020]P = O)
+```
+
+Nothing here is big - `0x3FB` is just 1019 in hexadecimal - but the `0x` prefix is a token the `u128` parser refuses, so the routing rule kicks in automatically and the *entire* subcommand runs on the 4096-bit engine (`U4096` + `cubic4096`): no flag asked, same table shape, same exit codes. The math: since `1019 = 2 (mod 3)`, `y^2 = x^3 + 5` is a CM supersingular curve (`j = 0` family) with expected order `p + 1 = 1020`, and certification means annihilating sampled points: `[1020]P = O`. The two sampled points share `x = 0` (then `y^2 = 5` has the conjugate roots 32 and `987 = 1019 - 32`), both `PASSED`, so `CERTIFICATO` and exit code 0.
+
 ## Code structure and quality
 
 ```text
