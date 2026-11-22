@@ -1,6 +1,6 @@
 [package]
 name = "kronoprime"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 description = "Large-number analysis and factorization engine with 3x3 decade matrices, Miller-Rabin, Pollard-Brent and a dependency-free 4096-bit cubic/curve profile"
 
