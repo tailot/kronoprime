@@ -18,7 +18,11 @@
 use crate::cubic::{
     eval_discriminant, scalar_mul, sub_mod, DiscriminantStatus, ECPoint, PointOpResult,
 };
-use crate::primality::{add_mod, is_prime, mul_mod};
+use crate::cubic4096::{
+    eval_discriminant_4096, scalar_mul_4096, DiscriminantStatus4096, Point4096, PointOpResult4096,
+};
+use crate::primality::{add_mod, is_prime, is_prime_u4096, mul_mod};
+use crate::u4096::U4096;
 
 /// Build the sorted list of primes up to 1009 (exactly 169 of them) at
 /// compile time.
@@ -46,7 +50,7 @@ const fn build_small_primes() -> [u32; 169] {
 }
 
 /// Primes used by the trial-division stage (up to 1009 inclusive).
-const SMALL_PRIMES: [u32; 169] = build_small_primes();
+pub(crate) const SMALL_PRIMES: [u32; 169] = build_small_primes();
 
 // Compile-time check that the 169-slot table is exactly full.
 const _: () = assert!(build_small_primes()[168] == 1009);
@@ -331,6 +335,245 @@ pub fn cubic_factor_probe(n: u128, limit: usize) -> Option<CubicFactorResult> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// The 4096-bit probe
+//
+// The stages are the same three ideas as `cubic_factor_probe` - small primes,
+// a singular discriminant, and an addition law that cannot finish - but every
+// value is a `U4096`, so a modulus of a few hundred bits (or the full 4096) is
+// admissible. Nothing here converts through `u128`: the small-prime stage uses
+// the single-word division of `U4096`, and the rest runs on wide residues.
+// ---------------------------------------------------------------------------
+
+/// Result of a wide cubic factorization probe, with both factors ordered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CubicFactorResult4096 {
+    /// The smaller factor.
+    pub factor1: U4096,
+    /// The complementary factor, `n / factor1`.
+    pub factor2: U4096,
+    /// Curve parameter in use when the factor surfaced.
+    pub a: U4096,
+    /// Curve parameter in use when the factor surfaced.
+    pub b: U4096,
+    /// Which stage produced the factor.
+    pub mechanism: &'static str,
+}
+
+/// Orders a factor and its complement, the way the narrow probe reports them.
+fn ordered_pair(n: &U4096, g: &U4096) -> (U4096, U4096) {
+    let cof = n.quo(g);
+    if *g <= cof {
+        (*g, cof)
+    } else {
+        (cof, *g)
+    }
+}
+
+/// Pollard-Brent cycle walking on `x -> x^2 + c mod n`, with the product of
+/// differences accumulated so the gcd runs once per block of 64 steps.
+///
+/// `None` means the cycle closed on `n` itself (or the step budget ran out) and
+/// another `c` should be tried.
+fn wide_brent_rho(n: &U4096, c: &U4096, y0: &U4096) -> Option<U4096> {
+    if n <= &U4096::ONE || n.is_even() {
+        return if n.is_even() && *n > U4096::TWO {
+            Some(U4096::TWO)
+        } else {
+            None
+        };
+    }
+    let mut x = U4096::ZERO;
+    let mut y = y0.rem(n);
+    let mut ys = y;
+    let mut g = U4096::ONE;
+    let mut r: u64 = 1;
+    // Each round doubles the walk; past 2^22 steps the expected work exceeds
+    // what a probe should spend, and the caller moves to the next curve.
+    while g.is_one() && r < (1 << 22) {
+        x = y;
+        for _ in 0..r {
+            y = y.mul_mod(&y, n).add_mod(c, n);
+        }
+        let mut k: u64 = 0;
+        while k < r && g.is_one() {
+            ys = y;
+            let mut q = U4096::ONE;
+            let block = (r - k).min(64);
+            for _ in 0..block {
+                y = y.mul_mod(&y, n).add_mod(c, n);
+                let diff = x.sub_mod(&y, n);
+                if !diff.is_zero() {
+                    q = q.mul_mod(&diff, n);
+                }
+            }
+            g = q.gcd(n);
+            k += 64;
+        }
+        r = r.saturating_mul(2);
+    }
+    if g.is_one() {
+        return None;
+    }
+    if g >= *n {
+        // The batched product collapsed onto n: walk the last block one step at
+        // a time and take the first difference that shares a factor.
+        let mut t = ys;
+        for _ in 0..4096 {
+            t = t.mul_mod(&t, n).add_mod(c, n);
+            let d = x.sub_mod(&t, n).gcd(n);
+            if !d.is_one() {
+                return if d < *n { Some(d) } else { None };
+            }
+        }
+        return None;
+    }
+    Some(g)
+}
+
+/// Attempts to factorize a wide composite `n` with cubic curve singularities
+/// (`DiscriminantGcd`, `TrialDivision`), an addition law that fails on a proper
+/// subring (`PointInversionFailure`, Lenstra ECM stage 1), and finally the
+/// Pollard-Brent walk.
+///
+/// `limit` bounds how many curves each stage inspects. Returns `None` when `n`
+/// is prime, when it is `0` or `1`, or when no stage found anything inside the
+/// budget.
+pub fn cubic_factor_probe_4096(n: &U4096, limit: usize) -> Option<CubicFactorResult4096> {
+    if n <= &U4096::ONE || is_prime_u4096(n) {
+        return None;
+    }
+
+    // 1. Trial division by the small-prime table, using the one-word divisor
+    // path of the wide type.
+    for &p in SMALL_PRIMES.iter() {
+        let (_, rem) = n.div_rem_u64(u64::from(p));
+        if rem == 0 {
+            let (f1, f2) = ordered_pair(n, &U4096::from_u64(u64::from(p)));
+            return Some(CubicFactorResult4096 {
+                factor1: f1,
+                factor2: f2,
+                a: U4096::ZERO,
+                b: U4096::ZERO,
+                mechanism: "TrialDivision",
+            });
+        }
+    }
+
+    let zero = U4096::ZERO;
+    let one = U4096::ONE;
+
+    // 2. Discriminant gcd: Delta = -16(4a^3 + 27b^2) sharing a factor with n
+    // means the cubic is singular in exactly one of the unknown subrings.
+    for i in 1..=limit {
+        let i_u = U4096::from_u64(i as u64);
+        let candidates = [
+            (i_u, i_u),
+            (i_u, i_u.mul_mod(&U4096::TWO, n)),
+            (
+                i_u.mul_mod(&U4096::THREE, n),
+                i_u.mul_mod(&U4096::from_u64(5), n),
+            ),
+        ];
+        for (a, b) in candidates {
+            let (_, status) = eval_discriminant_4096(&a, &b, n);
+            if let DiscriminantStatus4096::FactorFound(g) = status {
+                let (f1, f2) = ordered_pair(n, &g);
+                return Some(CubicFactorResult4096 {
+                    factor1: f1,
+                    factor2: f2,
+                    a,
+                    b,
+                    mechanism: "DiscriminantGcd",
+                });
+            }
+        }
+    }
+
+    // 3. Lenstra ECM stage 1: a curve through a chosen point, then smooth
+    // prime powers. A non-invertible denominator is a factor.
+    for seed in 1..=limit {
+        let s = U4096::from_u64(seed as u64);
+        let x0 = s.mul_mod(&U4096::from_u64(17), n).add_mod(&one, n);
+        let y0 = s
+            .mul_mod(&U4096::from_u64(31), n)
+            .add_mod(&U4096::from_u64(5), n);
+        let a = s
+            .mul_mod(&U4096::from_u64(13), n)
+            .add_mod(&U4096::from_u64(7), n);
+        let y0_sq = y0.mul_mod(&y0, n);
+        let x0_cu = x0.mul_mod(&x0, n).mul_mod(&x0, n);
+        let ax0 = a.mul_mod(&x0, n);
+        let b = y0_sq.sub_mod(&x0_cu.add_mod(&ax0, n), n);
+
+        let (_, status) = eval_discriminant_4096(&a, &b, n);
+        if let DiscriminantStatus4096::FactorFound(g) = status {
+            let (f1, f2) = ordered_pair(n, &g);
+            return Some(CubicFactorResult4096 {
+                factor1: f1,
+                factor2: f2,
+                a,
+                b,
+                mechanism: "DiscriminantGcd",
+            });
+        }
+
+        let mut pt = Point4096::Affine(x0, y0);
+        for &p in &SMALL_PRIMES[..SMALL_PRIMES.len().min(50)] {
+            let p_u = U4096::from_u64(u64::from(p));
+            let bound = U4096::from_u64(500);
+            let mut pk = p_u;
+            loop {
+                let next = pk.mul_u64(u64::from(p)).0;
+                if next > bound {
+                    break;
+                }
+                pk = next;
+            }
+            match scalar_mul_4096(pt, &pk, &a, n) {
+                PointOpResult4096::Success(new_pt) => {
+                    if new_pt == Point4096::Infinity {
+                        break;
+                    }
+                    pt = new_pt;
+                }
+                PointOpResult4096::FactorFound(g) => {
+                    let (f1, f2) = ordered_pair(n, &g);
+                    return Some(CubicFactorResult4096 {
+                        factor1: f1,
+                        factor2: f2,
+                        a,
+                        b,
+                        mechanism: "PointInversionFailure",
+                    });
+                }
+            }
+        }
+    }
+
+    // 4. Pollard-Brent on wide residues, sweeping the curve constant.
+    if limit > 0 {
+        for attempt in 0..limit.max(8) {
+            let c = U4096::from_seed(0x9E37_79B9_7F4A_7C15 ^ (attempt as u64))
+                .rem(&n.sub(&U4096::ONE).0)
+                .add_mod(&U4096::ONE, n);
+            let y0 = U4096::sample_below(0xC0FF_EE00_9E37_79B9 ^ (attempt as u64), n);
+            if let Some(g) = wide_brent_rho(n, &c, &y0) {
+                let (f1, f2) = ordered_pair(n, &g);
+                return Some(CubicFactorResult4096 {
+                    factor1: f1,
+                    factor2: f2,
+                    a: c,
+                    b: zero,
+                    mechanism: "PointInversionFailure",
+                });
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +666,86 @@ mod tests {
         assert_eq!(res.a, 200300);
         assert_eq!(res.b, 200300);
         assert_eq!(res.mechanism, "DiscriminantGcd");
+    }
+
+    #[test]
+    fn wide_probe_declines_primes_and_degenerate_moduli() {
+        assert!(cubic_factor_probe_4096(&U4096::ZERO, 5).is_none());
+        assert!(cubic_factor_probe_4096(&U4096::ONE, 5).is_none());
+        // Primes, at two different widths: nothing to split, so nothing to report.
+        assert!(cubic_factor_probe_4096(&U4096::from_u64(1019), 5).is_none());
+        assert!(cubic_factor_probe_4096(&U4096::from_u64(1_000_003), 8).is_none());
+    }
+
+    #[test]
+    fn wide_probe_splits_the_narrow_semiprime_with_small_primes() {
+        let n = U4096::from_u64(2_021_027);
+        let res = cubic_factor_probe_4096(&n, 12).expect("2021027 = 1009 * 2003");
+        assert_eq!(res.factor1, U4096::from_u64(1009));
+        assert_eq!(res.factor2, U4096::from_u64(2003));
+        assert_eq!(res.mechanism, "TrialDivision");
+        assert_eq!((res.factor1 * res.factor2), n);
+    }
+
+    #[test]
+    fn wide_probe_splits_a_modulus_beyond_u128() {
+        // 99991 * 1000003^7: 157 bits, far outside the narrow profile, and both
+        // primes sit above the trial-division table, so this run is earned by
+        // the curve stages and by the wide Pollard-Brent walk.
+        let p = U4096::from_u64(99_991);
+        let q = U4096::from_u64(1_000_003);
+        let mut n = p;
+        for _ in 0..7 {
+            n = n * q;
+        }
+        assert!(n > U4096::from_u128(u128::MAX));
+        assert_eq!(n.bits(), 157);
+
+        let res =
+            cubic_factor_probe_4096(&n, 20).expect("a 157-bit composite yields to ECM or rho");
+        assert!(res.factor1 > U4096::ONE && res.factor1 < n);
+        assert!(res.factor2 >= res.factor1 && res.factor2 < n);
+        assert_eq!((res.factor1 * res.factor2), n);
+        assert_eq!(n.rem(&res.factor1), U4096::ZERO);
+        assert_eq!(n.rem(&res.factor2), U4096::ZERO);
+        // Every proper divisor of n is a product of the two primes, so whichever
+        // one surfaced must be divisible by at least one of them.
+        assert!(
+            res.factor1.rem(&p).is_zero() || res.factor1.rem(&q).is_zero(),
+            "unexpected factor {}",
+            res.factor1.to_dec_string()
+        );
+        assert!(matches!(
+            res.mechanism,
+            "DiscriminantGcd" | "PointInversionFailure"
+        ));
+    }
+
+    #[test]
+    fn wide_probe_split_is_always_a_true_factorisation() {
+        // A common 130-bit cofactor times three different small primes: the
+        // first one is inside the trial-division table, the other two are not,
+        // so the later ones have to be earned by the curve and rho stages.
+        let cofactor = U4096::from_dec("1000000000000000000000000000000000000007").unwrap();
+        assert!(cofactor > U4096::from_u128(u128::MAX));
+        for p in [1009u64, 99_991, 1_000_003] {
+            let wide_p = U4096::from_u64(p);
+            let n = wide_p * cofactor;
+            let res = cubic_factor_probe_4096(&n, 25)
+                .unwrap_or_else(|| panic!("no split for a modulus with factor {p}"));
+            assert!(res.factor1 > U4096::ONE && res.factor1 < n);
+            assert!(res.factor2 >= res.factor1 && res.factor2 < n);
+            assert_eq!(
+                (res.factor1 * res.factor2),
+                n,
+                "the two factors must multiply back to {p} * the cofactor"
+            );
+            assert_eq!(n.rem(&res.factor1), U4096::ZERO);
+            assert_eq!(n.rem(&res.factor2), U4096::ZERO);
+            assert!(matches!(
+                res.mechanism,
+                "TrialDivision" | "DiscriminantGcd" | "PointInversionFailure"
+            ));
+        }
     }
 }

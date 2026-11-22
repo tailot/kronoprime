@@ -13,6 +13,9 @@
 //! The modular helpers here are shared with the factorization stage and
 //! are overflow safe for every modulus up to `u128::MAX`.
 
+use crate::factor::SMALL_PRIMES;
+use crate::u4096::{MontCtx, U4096};
+
 /// Small primes screened before Miller-Rabin.
 const TRIAL_PRIMES: [u128; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
 
@@ -145,6 +148,78 @@ pub fn is_prime(n: u128) -> bool {
     bases
         .iter()
         .all(|&a| miller_rabin_pass(n, d, s, u128::from(a)))
+}
+
+/// Miller-Rabin strong probable prime test for 4096-bit integers (`U4096`).
+///
+/// Trial division by the small primes screens out the cheap composites, then a
+/// single Montgomery context for `n` drives all the modular exponentiations.
+/// With the full 40-base extended profile the strong pseudoprime probability
+/// stays below `4^-40`, matching the `u128` profile.
+pub fn is_prime_u4096(n: &U4096) -> bool {
+    is_prime_u4096_with_bases(n, MR_BASES_EXTENDED.len())
+}
+
+/// Same test with an explicit witness budget: `rounds` bases are used, so the
+/// false-prime probability is bounded by `4^-rounds`. Callers running the test
+/// inside a search loop can trade certainty for speed.
+pub fn is_prime_u4096_with_bases(n: &U4096, rounds: usize) -> bool {
+    if *n < U4096::TWO {
+        return false;
+    }
+    // Trial division over the full 169-prime table (up to 1009). Each test is a
+    // single-limb division, so the whole sweep costs a few thousand word
+    // operations and removes the overwhelming majority of random composites
+    // before any modular exponentiation runs.
+    for &p in SMALL_PRIMES.iter() {
+        let p_u4096 = U4096::from_u64(u64::from(p));
+        match n.cmp(&p_u4096) {
+            std::cmp::Ordering::Equal => return true,
+            std::cmp::Ordering::Less => break,
+            std::cmp::Ordering::Greater => {}
+        }
+        if n.rem(&p_u4096).is_zero() {
+            return false;
+        }
+    }
+
+    let n_minus_1 = n.sub(&U4096::ONE).0;
+    let s = n_minus_1.trailing_zeros();
+    let d = n_minus_1.shr(s as usize);
+
+    let ctx = match MontCtx::new(n) {
+        Some(ctx) => ctx,
+        // Even moduli above are already excluded, so this only happens for the
+        // degenerate 0 and 1 moduli, which the guard above rejects.
+        None => return false,
+    };
+    let one = ctx.one();
+    let minus_one = ctx.to_mont(&n_minus_1);
+
+    let rounds = rounds.min(MR_BASES_EXTENDED.len());
+    for &a in MR_BASES_EXTENDED.iter().take(rounds) {
+        let a_u4096 = U4096::from_u64(a);
+        if a_u4096 >= *n {
+            continue;
+        }
+        let a_mont = ctx.to_mont(&a_u4096);
+        let mut x = ctx.pow_mont_arr(&a_mont, &d);
+        if ctx.eq_mont(&x, &one) || ctx.eq_mont(&x, &minus_one) {
+            continue;
+        }
+        let mut probably_composite = true;
+        for _ in 1..s {
+            x = ctx.mul(&x, &x);
+            if ctx.eq_mont(&x, &minus_one) {
+                probably_composite = false;
+                break;
+            }
+        }
+        if probably_composite {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]

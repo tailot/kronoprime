@@ -1,6 +1,6 @@
 # KronoPrime
 
-A **Rust** engine for analyzing and factoring large integers (`u64` standard profile, `u128` extended profile), integrating the geometric and modular constraints of the **per-decade 3x3 matrix** grid.
+A **Rust** engine for analyzing and factoring large integers (`u64` standard profile, `u128` extended profile), integrating the geometric and modular constraints of the **per-decade 3x3 matrix** grid. The cubic and elliptic-curve layer additionally runs on a dedicated **4096-bit profile** (`U4096`: 64 `u64` limbs, stack-allocated, still zero external dependencies), reached automatically as soon as a value is something `u128` cannot read.
 
 ## Project overview
 
@@ -55,7 +55,7 @@ Multiples of 10 sit on the border between two decades and occupy no cell.
 
 **The real role of `N` in factorization.** `N(n)` only identifies the decade of `n` (magnitude ~`n/10`): it reveals nothing about the indices of the factors and does not reduce the complexity, which depends on the smallest prime factor `p_min` and is handled with Miller-Rabin + Pollard rho. The index `N` does give a concrete structural advantage in the quadruplet search (above).
 
-**Beyond Pollard rho (roadmap).** Pollard rho (heuristic `O(p_min^(1/4))`) is excellent up to factors of ~10-12 digits. In the future, beyond KronoPrime's lightweight `u64`/`u128` core: **ECM** (functional in the smallest factor), **SIQS** (balanced semiprimes ~80-100 digits), **NFS** (asymptotically the best, out of scope due to implementation cost).
+**Beyond Pollard rho.** Pollard rho (heuristic `O(p_min^(1/4))`) is excellent up to factors of ~10-12 digits. At 4096 bits `cubic factor-probe` already runs a four-stage attack on a composite modulus - trial division, discriminant gcd, **Lenstra ECM stage 1** (a curve through a chosen point, a smooth multiple of its order via the x-only ladder, the factor read off the non-invertible denominator), then a Pollard-Brent walk sweeping the curve constant - and a 157-bit semiprime falls to it inside the test suite. What is still roadmap: ECM **stage 2** at width, **SIQS** (balanced semiprimes ~80-100 digits), **NFS** (asymptotically the best, out of scope due to implementation cost).
 
 ## Why the 3x3 grid pays off — reasons and measurements
 
@@ -125,6 +125,25 @@ earns time only when **generating or discarding candidates in bulk**
 (quadruplet searches, tables, range sieves), which is exactly where it is
 used in this engine.
 
+## The 4096-bit wide profile
+
+Curve work is not capped at `u128`. `src/u4096.rs` is a fixed-width 4096-bit unsigned integer - 64 `u64` limbs, stack-allocated, no external crates - with Knuth's Algorithm D over a `[u64; 129]` stack buffer, Montgomery multiplication, and full modular arithmetic (`add_mod`, `sub_mod`, `mul_mod`, `div_rem`, `inv_mod`, `gcd`, `pow_mod`, bit accessors, decimal/hex I/O). `src/cubic4096.rs` rebuilds the whole cubic layer on top of it: discriminant `-16(4a^3 + 27b^2)`, classification (nodal, cuspidal, CM supersingular with a closed-form order, Montgomery form, ordinary), affine and Jacobian point arithmetic with Lenstra-style factor extraction, scalar multiplication, a Montgomery x-only ladder, CM curve search and curve-order certification. `3x3` matrix invariants and the factor probe have wide counterparts as well, and Miller-Rabin uses the 40-base set at this width.
+
+Routing is decided per token, not by a flag: any `--modulus`, `--a`, `--b`, `--point`, `--scalar` or `--matrix` cell that the `u128` parser **cannot read** but `U4096` can - a decimal beyond `u128::MAX`, or any `0x`-prefixed hexadecimal - switches that subcommand to the wide engine. Same flags, same table/JSON shapes, same exit codes.
+
+Measured on a desktop release build, by the two load tests (`cargo test --release -- --ignored --nocapture`):
+
+| Operation (4096-bit modulus) | Cost |
+|---|---|
+| one `mul_mod` (8192-bit product + one Algorithm D reduction) | 4.6 microseconds |
+| `[k]P` with a 192-bit scalar | 6.0 ms |
+| Miller-Rabin, 4 bases, composite caught early | 0.1 ms |
+| Miller-Rabin, 40 bases, on the prime the search finds | 2.14 s |
+| finding a random 4096-bit prime (3755 odd candidates) | 24.6 s |
+| order certification `[p+1]P = O`, per sampled point | ~135 ms |
+
+The certification test does exactly what it says: it finds a 4096-bit prime `p`, picks the CM family the residue of `p` supports (`j = 0` when `p = 2 mod 3`, `j = 1728` when `p = 3 mod 4`), classifies the curve, and checks that its order really is `p + 1` by annihilating sampled points. Both tests are `#[ignore]`d so the ordinary suite stays fast.
+
 ## Usage: CLI and Cargo
 
 ```sh
@@ -140,6 +159,11 @@ cat numbers.txt | ./target/release/kronoprime --matrix
 ./target/release/kronoprime cubic verify --a 0 --b 5 --modulus 1019 --points 3 --format table
 ./target/release/kronoprime cubic factor-probe --modulus 2021027 --limit 50 --format json
 ./target/release/kronoprime cubic point-ops --a 0 --b 5 --modulus 1019 --point "12,431" --scalar 1020 --format table
+
+# The same subcommands at width: a value u128 cannot read switches engine
+./target/release/kronoprime cubic verify --a 0 --b 5 --modulus 0x3FB --points 2 --format table
+./target/release/kronoprime cubic factor-probe --modulus 1000000000000000000000000000000000000007 --limit 4 --format json
+./target/release/kronoprime cubic point-ops --a 0 --b 4 --modulus 0xFFFFFFFFFFFFFFFF --point "0,2" --scalar 3 --format table
 ```
 
 Standard output:
@@ -164,25 +188,28 @@ Quadruplet: Matrix N=83 -> [821, 823, 827, 829]
 Quadruplet: Matrix N=149 -> [1481, 1483, 1487, 1489]
 ```
 
-Flags: `--json`, `--matrix`, `--quadruplets <K>` (or `--quadruplets=<K>`, max 100000), `-h/--help`, `--version`. Valid inputs: integers in `0..=u128::MAX`; non-numeric or out-of-range inputs are reported on stderr (exit code 1).
+Flags: `--json`, `--matrix`, `--quadruplets <K>` (or `--quadruplets=<K>`, max 100000), `-h/--help`, `--version`. Valid inputs: integers in `0..=u128::MAX`; non-numeric or out-of-range inputs are reported on stderr (exit code 1). The `cubic` subcommands use the same flags and accept values up to 4096 bits, decimal or `0x` hexadecimal; their exit codes are width-independent (`2` when `factor-probe` finds a factor, `1` when a `verify` certification fails, `0` otherwise).
 
 ## Code structure and quality
 
 ```text
 src/
   main.rs        entry point
-  cli.rs         argument parsing, stdin, text/JSON reports, cubic subcommands
-  matrix.rs      3x3 grid, slots, mod-10 compatibility, mod-3003 wheel, matrix invariants & Tschirnhaus
-  primality.rs   Miller-Rabin + overflow-safe modular arithmetic (u128)
-  factor.rs      trial division, Pollard-Brent, worklist, cubic factor probe
+  cli.rs         argument parsing, stdin, text/JSON reports, cubic subcommands, wide-profile routing
+  matrix.rs      3x3 grid, slots, mod-10 compatibility, mod-3003 wheel, matrix invariants & Tschirnhaus (u128 and 4096)
+  primality.rs   Miller-Rabin + overflow-safe modular arithmetic (u128), 40-base Miller-Rabin for U4096
+  factor.rs      trial division, Pollard-Brent, worklist, cubic factor probe (u128 and 4096)
   cubic.rs       cubic & elliptic curve discovery, classification, point operations, Tonelli-Shanks
+  u4096.rs       4096-bit fixed-width integer: Knuth D on a stack buffer, Montgomery, full modular arithmetic
+  cubic4096.rs   the same cubic/curve layer at 4096 bits: discriminant, classes, points, ladder, CM search
 tests/
   integration.rs end-to-end invariants (factor product, slots, timing, cubic & matrix validation)
 ```
 
 - **No panics on extreme inputs**: overflow-free arithmetic (`add_mod`/`mul_mod` with a native `u128` path below 2^64 and multiply-and-add above it), edge cases covered (`0`, `1`, `u64::MAX`, Mersenne numbers, Carmichael numbers, prime powers).
-- **Tests**: `cargo test` and `cargo test --release` (unit + integration).
-- **Quality**: `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings` clean; precomputed tables in `const fn`; zero external dependencies.
+- **Tests**: `cargo test` and `cargo test --release` (unit + integration); `cargo test --release -- --ignored --nocapture` runs the two 4096-bit load and certification tests (~28 s) and prints the timings above.
+- **Debug-build contracts**: at width, `add_mod`/`sub_mod`/`mul_mod` assert that both operands are already reduced and `div_knuth` asserts the buffer bound, so the debug suite is a real check rather than a slower copy of the release one. Every constant the formulas multiply by (2, 3, 4, 16, 27) is taken into the residue ring first, which is what keeps moduli as small as 2 honest.
+- **Quality**: `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings` clean; precomputed tables in `const fn`; zero external dependencies - the 4096-bit path stays on the stack, so the handful of lints that would push it onto the heap are allowed with a comment instead of silenced.
 
 ## CI/CD (GitHub Actions, Linux)
 

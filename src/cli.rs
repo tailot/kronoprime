@@ -8,9 +8,19 @@ use crate::cubic::{
     classify_weierstrass, eval_discriminant, find_cm_curves, gcd, is_on_curve, sample_points,
     scalar_mul, sub_mod, CubicCurve, CurveClass, DiscriminantStatus, ECPoint, PointOpResult,
 };
-use crate::factor::{cubic_factor_probe, factor};
-use crate::matrix::{self, matrix_invariants_3x3, parse_matrix_3x3, Matrix3x3CubicExt, Placement};
-use crate::primality::{is_prime, mul_mod};
+use crate::cubic4096::{
+    classify_curve_4096, eval_discriminant_4096, find_cm_curves_4096, is_on_curve_4096,
+    sample_points_4096, scalar_mul_4096, Curve4096, CurveClass4096, CurveError4096,
+    DiscriminantStatus4096, Point4096, PointOpResult4096,
+};
+use crate::factor::{cubic_factor_probe, cubic_factor_probe_4096, factor};
+use crate::matrix::{
+    self, depressed_params_4096, extract_cubic_curve_4096, matrix_invariants_3x3,
+    matrix_invariants_4096, parse_matrix_3x3, parse_matrix_4096, Matrix3x3CubicExt,
+    MatrixError4096, Placement,
+};
+use crate::primality::{is_prime, is_prime_u4096, mul_mod};
+use crate::u4096::U4096;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::time::Instant;
 
@@ -316,7 +326,10 @@ fn print_usage() {
          \x20 from-matrix          convert 3x3 matrix to Weierstrass form and classify\n\
          \x20 verify               certify curve order empirically by checking [order]P = O\n\
          \x20 factor-probe         factorize composite modulus via cubic curve singularities / ECM\n\
-         \x20 point-ops            point arithmetic (scalar multiplication) on a curve",
+         \x20 point-ops            point arithmetic (scalar multiplication) on a curve\n\n\
+         Cubic values may reach 4096 bits: moduli, coefficients, points, scalars\n\
+         and matrix cells above u128::MAX (and 0x-prefixed hexadecimal values)\n\
+         run on the dedicated 4096-bit engine with the same flags and exit codes.",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -355,11 +368,16 @@ fn print_cubic_usage() {
          \x20 verify       certify curve order empirically by checking [order]P = O\n\
          \x20 factor-probe factorize composite modulus via cubic curve singularities / ECM\n\
          \x20 point-ops    perform point operations (scalar multiplication) on a curve\n\n\
-         Run 'kronoprime cubic <subcommand> --help' for details on a specific subcommand."
+         Run 'kronoprime cubic <subcommand> --help' for details on a specific subcommand.\n\n\
+         Values beyond u128::MAX, decimal or 0x-prefixed hexadecimal, are accepted\n\
+         by every subcommand above up to 4096 bits, with the same flags and exit codes."
     );
 }
 
 fn run_cubic_scan(args: &[String]) -> u8 {
+    if args_need_wide(args) {
+        return run_cubic_scan_wide(args);
+    }
     let mut modulus: Option<u128> = None;
     let mut limit: usize = 100;
     let mut class_filter = "all".to_string();
@@ -592,6 +610,9 @@ fn run_cubic_scan(args: &[String]) -> u8 {
 }
 
 fn run_cubic_from_matrix(args: &[String]) -> u8 {
+    if args_need_wide(args) {
+        return run_cubic_from_matrix_wide(args);
+    }
     let mut matrix_str: Option<String> = None;
     let mut modulus: Option<u128> = None;
     let mut format_mode = "table".to_string();
@@ -722,6 +743,9 @@ fn run_cubic_from_matrix(args: &[String]) -> u8 {
 }
 
 fn run_cubic_verify(args: &[String]) -> u8 {
+    if args_need_wide(args) {
+        return run_cubic_verify_wide(args);
+    }
     let mut a_val: Option<u128> = None;
     let mut b_val: Option<u128> = None;
     let mut modulus: Option<u128> = None;
@@ -949,6 +973,9 @@ fn run_cubic_verify(args: &[String]) -> u8 {
 }
 
 fn run_cubic_factor_probe(args: &[String]) -> u8 {
+    if args_need_wide(args) {
+        return run_cubic_factor_probe_wide(args);
+    }
     let mut modulus: Option<u128> = None;
     let mut limit: usize = 500;
     let mut format_mode = "json".to_string();
@@ -1044,6 +1071,9 @@ fn run_cubic_factor_probe(args: &[String]) -> u8 {
 }
 
 fn run_cubic_point_ops(args: &[String]) -> u8 {
+    if args_need_wide(args) {
+        return run_cubic_point_ops_wide(args);
+    }
     let mut a_val: Option<u128> = None;
     let mut b_val: Option<u128> = None;
     let mut modulus: Option<u128> = None;
@@ -1240,6 +1270,930 @@ fn run_cubic_point_ops(args: &[String]) -> u8 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Profilo a 4096 bit: gli stessi sottocomandi per valori oltre `u128::MAX`
+// ---------------------------------------------------------------------------
+
+/// Flag il cui valore è dato di curva e può quindi superare `u128`.
+const WIDE_VALUE_FLAGS: [&str; 6] = ["--modulus", "--a", "--b", "--point", "--scalar", "--matrix"];
+
+/// Raccoglie i valori di ogni flag wide, accettando sia la forma
+/// `--flag <value>` sia la `--flag=<value>`.
+fn wide_flag_values(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut idx = 0;
+    while idx < args.len() {
+        for flag in WIDE_VALUE_FLAGS {
+            if let Some(rest) = args[idx].strip_prefix(&format!("{flag}=")) {
+                out.push(rest.to_string());
+            } else if args[idx] == flag {
+                if let Some(next) = args.get(idx + 1) {
+                    out.push(next.clone());
+                }
+            }
+        }
+        idx += 1;
+    }
+    out
+}
+
+/// Vero quando `payload` contiene un intero che il profilo u128 non riesce a
+/// leggere mentre il profilo a 4096 bit lo accetta: è il punto di passaggio fra
+/// i due motori. Vale sia per i decimali oltre `u128::MAX` sia per gli esadecimali
+/// con prefisso `0x`, che il profilo narrow non accetta a nessuna larghezza.
+fn payload_needs_wide(payload: &str) -> bool {
+    let mut runs = Vec::new();
+    let mut token = String::new();
+    for ch in payload.chars() {
+        if ch.is_ascii_alphanumeric() {
+            token.push(ch);
+        } else if !token.is_empty() {
+            runs.push(std::mem::take(&mut token));
+        }
+    }
+    if !token.is_empty() {
+        runs.push(token);
+    }
+    runs.iter()
+        .any(|run| run.parse::<u128>().is_err() && U4096::from_str(run).is_ok())
+}
+
+/// Vero quando un valore di dati di curva richiede il motore a 4096 bit.
+fn args_need_wide(args: &[String]) -> bool {
+    wide_flag_values(args)
+        .iter()
+        .any(|payload| payload_needs_wide(payload))
+}
+
+/// Opzioni dei sottocomandi wide: rispecchiano i flag dei corrispettivi narrow,
+/// così che entrambe le linee accettino le stesse righe di comando.
+#[derive(Debug, Clone)]
+struct WideOptions {
+    modulus: Option<U4096>,
+    a: Option<U4096>,
+    b: Option<U4096>,
+    scalar: Option<U4096>,
+    point: Option<String>,
+    matrix: Option<String>,
+    class: String,
+    format: String,
+    limit: usize,
+    points: usize,
+    stop_on_factor: bool,
+}
+
+impl WideOptions {
+    /// Default del sottocomando `sub`, allineati a quelli della via narrow. Il
+    /// `verify` wide campiona tre punti invece di dieci: ogni certificazione è
+    /// una moltiplicazione scalare a 4096 bit, quindi qualche secondo.
+    fn for_subcommand(sub: &str) -> Self {
+        WideOptions {
+            modulus: None,
+            a: None,
+            b: None,
+            scalar: None,
+            point: None,
+            matrix: None,
+            class: "all".to_string(),
+            format: if sub == "factor-probe" {
+                "json".to_string()
+            } else {
+                "table".to_string()
+            },
+            limit: if sub == "scan" { 100 } else { 500 },
+            points: if sub == "verify" { 3 } else { 10 },
+            stop_on_factor: false,
+        }
+    }
+}
+
+/// Estrae il valore associato a un flag, sia dalla forma inline sia
+/// dall'argomento successivo, avanzando `idx` di quanto consumato.
+fn take_flag_value(args: &[String], idx: &mut usize, inline: &Option<String>) -> Option<String> {
+    if let Some(v) = inline {
+        return Some(v.clone());
+    }
+    let v = args.get(*idx).cloned();
+    if v.is_some() {
+        *idx += 1;
+    }
+    v
+}
+
+/// Analizza i flag di un sottocomando wide. `sub` nomina il sottocomando nei
+/// messaggi; il codice restituito, quando presente, è quello che il chiamante
+/// deve tornare subito (help stampato, oppure opzione sconosciuta).
+fn parse_wide_options(args: &[String], sub: &str) -> (WideOptions, Option<u8>) {
+    let mut opts = WideOptions::for_subcommand(sub);
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = args[idx].clone();
+        idx += 1;
+        if arg == "-h" || arg == "--help" {
+            print_wide_usage(sub);
+            return (opts, Some(0));
+        }
+        let (name, inline) = match arg.split_once('=') {
+            Some((name, value)) => (name.to_string(), Some(value.to_string())),
+            None => (arg.clone(), None),
+        };
+        let mut value = || take_flag_value(args, &mut idx, &inline);
+        match name.as_str() {
+            "--modulus" => opts.modulus = value().and_then(|s| U4096::from_str(&s).ok()),
+            "--a" => opts.a = value().and_then(|s| U4096::from_str(&s).ok()),
+            "--b" => opts.b = value().and_then(|s| U4096::from_str(&s).ok()),
+            "--scalar" => opts.scalar = value().and_then(|s| U4096::from_str(&s).ok()),
+            "--point" => opts.point = value(),
+            "--matrix" => opts.matrix = value(),
+            "--class" => opts.class = value().map(|s| s.to_lowercase()).unwrap_or_default(),
+            "--format" => opts.format = value().map(|s| s.to_lowercase()).unwrap_or_default(),
+            "--limit" => {
+                if let Some(v) = value() {
+                    if let Ok(v) = v.parse::<usize>() {
+                        opts.limit = v;
+                    }
+                }
+            }
+            "--points" => {
+                if let Some(v) = value() {
+                    if let Ok(v) = v.parse::<usize>() {
+                        opts.points = v;
+                    }
+                }
+            }
+            "--stop-on-factor" => opts.stop_on_factor = true,
+            other => {
+                eprintln!("error: unknown {sub} option '{other}'");
+                return (opts, Some(1));
+            }
+        }
+    }
+    (opts, None)
+}
+
+/// Uso del sottocomando wide: stessi flag del narrow, con i valori estesi.
+fn print_wide_usage(sub: &str) {
+    let line = match sub {
+        "scan" => "Usage: kronoprime cubic scan --modulus <N> [--limit <LIMIT>] [--class <CLASS>] [--format json|table] [--stop-on-factor]",
+        "from-matrix" => "Usage: kronoprime cubic from-matrix --matrix \"<MATRIX_STR>\" --modulus <N> [--format json|table]",
+        "verify" => "Usage: kronoprime cubic verify --a <A> --b <B> --modulus <P> [--points <NUM>] [--format json|table]",
+        "factor-probe" => "Usage: kronoprime cubic factor-probe --modulus <N> [--limit <LIMIT>] [--format json|table]",
+        _ => "Usage: kronoprime cubic point-ops --a <A> --b <B> --modulus <N> --point \"<X,Y>\" [--scalar <K>] [--format json|table]",
+    };
+    println!("{line}");
+    println!("(i valori oltre u128 sono gestiti dal profilo a 4096 bit)");
+}
+
+/// Tabella a due colonne il cui spazio cresce in funzione della cella più
+/// larga, così che i numeri a 4096 bit restino allineati nel formato `table`.
+fn wide_grid(header: &[&str], rows: &[Vec<String>]) -> String {
+    let mut widths: Vec<usize> = header.iter().map(|h| h.chars().count()).collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i < widths.len() {
+                widths[i] = widths[i].max(cell.chars().count());
+            }
+        }
+    }
+    let sep = format!(
+        "+{}+",
+        widths
+            .iter()
+            .map(|w| "-".repeat(w + 2))
+            .collect::<Vec<_>>()
+            .join("+")
+    );
+    let line_of = |cells: &[String]| -> String {
+        let mut out = String::from("|");
+        for (i, cell) in cells.iter().enumerate().take(widths.len()) {
+            out.push_str(&format!(" {:<w$} |", cell, w = widths[i]));
+        }
+        out
+    };
+    let mut out = String::new();
+    out.push_str(&sep);
+    out.push('\n');
+    out.push_str(&line_of(
+        &header.iter().map(|h| h.to_string()).collect::<Vec<_>>(),
+    ));
+    out.push('\n');
+    out.push_str(&sep);
+    out.push('\n');
+    for row in rows {
+        out.push_str(&line_of(row));
+        out.push('\n');
+    }
+    out.push_str(&sep);
+    out
+}
+
+/// Tabella `Proprietà`/`Valore` usata dai referti wide.
+fn wide_table(rows: &[(&str, String)]) -> String {
+    wide_grid(
+        &["Proprietà", "Valore"],
+        &rows
+            .iter()
+            .map(|(k, v)| vec![k.to_string(), v.clone()])
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Messaggio per un errore di classificazione wide, coerente con i referti
+/// narrow: un fattore intercettato resta un errore, ma viene nominato.
+fn wide_curve_error_message(err: &CurveError4096) -> String {
+    match err {
+        CurveError4096::InvalidModulus => "Modulo non valido".to_string(),
+        CurveError4096::FactorFound { factor, cofactor } => format!(
+            "Fattore non banale individuato: {} (n = {} * {})",
+            factor.to_dec_string(),
+            factor.to_dec_string(),
+            cofactor.to_dec_string()
+        ),
+    }
+}
+
+/// `kronoprime cubic scan` sul profilo a 4096 bit.
+fn run_cubic_scan_wide(args: &[String]) -> u8 {
+    let (opts, early) = parse_wide_options(args, "scan");
+    if let Some(code) = early {
+        return code;
+    }
+    let n = match opts.modulus {
+        Some(v) if v >= U4096::TWO => v,
+        _ => {
+            eprintln!("error: --modulus <N> (N >= 2) is required");
+            return 1;
+        }
+    };
+
+    if opts.stop_on_factor && !is_prime_u4096(&n) {
+        for k in 1..=(opts.limit as u64) {
+            let k = U4096::from_u64(k);
+            let (_, status) = eval_discriminant_4096(&k, &k, &n);
+            if let DiscriminantStatus4096::FactorFound(g) = status {
+                let other = n.quo(&g);
+                let (f1, f2) = if g <= other { (g, other) } else { (other, g) };
+                if opts.format == "json" {
+                    println!(
+                        "{{\n  \"status\": \"FactorFound\",\n  \"modulus\": {},\n  \"factor1\": {},\n  \"factor2\": {}\n}}",
+                        n.to_dec_string(),
+                        f1.to_dec_string(),
+                        f2.to_dec_string()
+                    );
+                } else {
+                    println!(
+                        "Fattore non banale individuato: {} (n = {} * {})",
+                        f1.to_dec_string(),
+                        f1.to_dec_string(),
+                        f2.to_dec_string()
+                    );
+                }
+                return 2;
+            }
+        }
+    }
+
+    // Costanti ridotte nel resto dell'anello: i moduli piccoli (2, 3) sono
+    // ammessi, e le operazioni modulari pretendono operandi già ridotti.
+    let two = U4096::TWO.rem(&n);
+    let three = U4096::THREE.rem(&n);
+    let mut curves: Vec<Curve4096> = Vec::new();
+    match opts.class.as_str() {
+        "cm" => curves = find_cm_curves_4096(&n, opts.limit),
+        "nodal" => {
+            for x0 in 1..=(opts.limit as u64) {
+                let x = U4096::from_u64(x0).rem(&n);
+                let x2 = x.mul_mod(&x, &n);
+                let a = U4096::ZERO.sub_mod(&three.mul_mod(&x2, &n), &n);
+                let b = two.mul_mod(&x.mul_mod(&x2, &n), &n);
+                if let Ok(c) = classify_curve_4096(&a, &b, &n) {
+                    if matches!(c.class, CurveClass4096::NodalSingular { .. }) {
+                        curves.push(c);
+                    }
+                }
+            }
+        }
+        "cuspidal" => {
+            if let Ok(c) = classify_curve_4096(&U4096::ZERO, &U4096::ZERO, &n) {
+                curves.push(c);
+            }
+        }
+        "montgomery" => {
+            let four = U4096::from_u64(4).rem(&n);
+            for a_param in 1..=(opts.limit as u64) {
+                for b_param in 1..=3u64 {
+                    let a_param = U4096::from_u64(a_param);
+                    let b_param = U4096::from_u64(b_param);
+                    let a_sq = a_param.mul_mod(&a_param, &n);
+                    let diff = a_sq.sub_mod(&four, &n);
+                    if !b_param.mul_mod(&diff, &n).is_zero() {
+                        curves.push(Curve4096 {
+                            a: a_param,
+                            b: b_param,
+                            modulus: n,
+                            discriminant: diff,
+                            class: CurveClass4096::MontgomeryForm { a_param, b_param },
+                        });
+                        if curves.len() >= opts.limit {
+                            break;
+                        }
+                    }
+                }
+                if curves.len() >= opts.limit {
+                    break;
+                }
+            }
+        }
+        _ => {
+            curves.extend(find_cm_curves_4096(&n, opts.limit));
+            if curves.len() < opts.limit {
+                if let Ok(c) = classify_curve_4096(&U4096::ZERO, &U4096::ZERO, &n) {
+                    curves.push(c);
+                }
+            }
+            let mut x0 = 1u64;
+            while curves.len() < opts.limit && x0 <= opts.limit as u64 {
+                let x = U4096::from_u64(x0);
+                let x2 = x.mul_mod(&x, &n);
+                let a = U4096::ZERO.sub_mod(&three.mul_mod(&x2, &n), &n);
+                let b = two.mul_mod(&x.mul_mod(&x2, &n), &n);
+                if let Ok(c) = classify_curve_4096(&a, &b, &n) {
+                    if !curves.contains(&c) {
+                        curves.push(c);
+                    }
+                }
+                x0 += 1;
+            }
+        }
+    }
+    curves.truncate(opts.limit);
+
+    if opts.format == "json" {
+        let items = curves
+            .iter()
+            .map(|c| {
+                let (class_str, closed_order) = match &c.class {
+                    CurveClass4096::CmSupersingular { closed_form_order } => {
+                        let kind = if c.a.is_zero() && c.modulus.rem(&three) == two {
+                            "CmSupersingularType1"
+                        } else {
+                            "CmSupersingularType2"
+                        };
+                        (kind.to_string(), closed_form_order.to_dec_string())
+                    }
+                    other => (other.name().to_string(), "null".to_string()),
+                };
+                if closed_order == "null" {
+                    format!(
+                        "  {{\n    \"a\": {},\n    \"b\": {},\n    \"modulus\": {},\n    \"discriminant\": {},\n    \"class\": \"{}\"\n  }}",
+                        c.a.to_dec_string(),
+                        c.b.to_dec_string(),
+                        c.modulus.to_dec_string(),
+                        c.discriminant.to_dec_string(),
+                        class_str
+                    )
+                } else {
+                    format!(
+                        "  {{\n    \"a\": {},\n    \"b\": {},\n    \"modulus\": {},\n    \"discriminant\": {},\n    \"class\": \"{}\",\n    \"closed_form_order\": {}\n  }}",
+                        c.a.to_dec_string(),
+                        c.b.to_dec_string(),
+                        c.modulus.to_dec_string(),
+                        c.discriminant.to_dec_string(),
+                        class_str,
+                        closed_order
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        println!("[\n{items}\n]");
+    } else {
+        let rows = curves
+            .iter()
+            .map(|c| {
+                let (class_label, order_label) = match &c.class {
+                    CurveClass4096::CmSupersingular { closed_form_order } => {
+                        let label = if c.a.is_zero() && c.modulus.rem(&three) == two {
+                            "CmSupersingular I"
+                        } else {
+                            "CmSupersingular II"
+                        };
+                        (label, closed_form_order.to_dec_string())
+                    }
+                    other => (other.name(), "-".to_string()),
+                };
+                vec![
+                    c.a.to_dec_string(),
+                    c.b.to_dec_string(),
+                    c.modulus.to_dec_string(),
+                    class_label.to_string(),
+                    order_label,
+                ]
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            wide_grid(
+                &[
+                    "Param a",
+                    "Param b",
+                    "Modulo n",
+                    "Classe Algebrica",
+                    "Ordine Chiuso (#E)"
+                ],
+                &rows
+            )
+        );
+    }
+
+    0
+}
+
+/// `kronoprime cubic from-matrix` sul profilo a 4096 bit.
+fn run_cubic_from_matrix_wide(args: &[String]) -> u8 {
+    let (opts, early) = parse_wide_options(args, "from-matrix");
+    if let Some(code) = early {
+        return code;
+    }
+    let m_str = match opts.matrix {
+        Some(s) => s,
+        None => {
+            eprintln!("error: --matrix \"<STR>\" is required");
+            return 1;
+        }
+    };
+    let n = match opts.modulus {
+        Some(v) if v >= U4096::TWO => v,
+        _ => {
+            eprintln!("error: --modulus <N> (N >= 2) is required");
+            return 1;
+        }
+    };
+    let m = match parse_matrix_4096(&m_str) {
+        Ok(mat) => mat,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+
+    let (tr, sigma2, det) = matrix_invariants_4096(&m, &n);
+    let (a, b) = match depressed_params_4096(&m, &n) {
+        Ok(params) => params,
+        Err(MatrixError4096::ThreeNotInvertible(g)) => {
+            if g > U4096::ONE && g < n {
+                eprintln!(
+                    "Fattore non banale individuato durante l'inversione: {}",
+                    g.to_dec_string()
+                );
+                return 2;
+            }
+            eprintln!(
+                "error: {}",
+                MatrixError4096::ThreeNotInvertible(g).message()
+            );
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("error: {}", e.message());
+            return 1;
+        }
+    };
+
+    let curve = match extract_cubic_curve_4096(&m, &n) {
+        Ok(c) => c,
+        Err(MatrixError4096::Curve(CurveError4096::FactorFound { factor, .. })) => {
+            eprintln!(
+                "Fattore non banale individuato dal discriminante: {}",
+                factor.to_dec_string()
+            );
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("error: {}", e.message());
+            return 1;
+        }
+    };
+
+    let class_str = curve.class.name();
+    let formatted_matrix = format!(
+        "[[{}, {}, {}],[{}, {}, {}],[{}, {}, {}]]",
+        m[0][0].to_dec_string(),
+        m[0][1].to_dec_string(),
+        m[0][2].to_dec_string(),
+        m[1][0].to_dec_string(),
+        m[1][1].to_dec_string(),
+        m[1][2].to_dec_string(),
+        m[2][0].to_dec_string(),
+        m[2][1].to_dec_string(),
+        m[2][2].to_dec_string()
+    );
+    let invariants = format!(
+        "tr={}, sigma2={}, det={}",
+        tr.to_dec_string(),
+        sigma2.to_dec_string(),
+        det.to_dec_string()
+    );
+
+    if opts.format == "json" {
+        println!(
+            "{{\n  \"input_matrix\": \"{}\",\n  \"invariants\": {{ \"tr\": {}, \"sigma2\": {}, \"det\": {} }},\n  \"weierstrass_form\": {{ \"a\": {}, \"b\": {} }},\n  \"discriminant\": {},\n  \"class\": \"{}\"\n}}",
+            formatted_matrix,
+            tr.to_dec_string(),
+            sigma2.to_dec_string(),
+            det.to_dec_string(),
+            a.to_dec_string(),
+            b.to_dec_string(),
+            curve.discriminant.to_dec_string(),
+            class_str
+        );
+    } else {
+        println!(
+            "{}",
+            wide_table(&[
+                ("Matrice Ingresso", formatted_matrix),
+                ("Modulo n", n.to_dec_string()),
+                ("Invarianti", invariants),
+                (
+                    "Weierstrass (a,b)",
+                    format!("a={}, b={}", a.to_dec_string(), b.to_dec_string()),
+                ),
+                ("Discriminante", curve.discriminant.to_dec_string()),
+                ("Classe Algebrica", class_str.to_string()),
+            ])
+        );
+    }
+
+    0
+}
+
+/// `kronoprime cubic verify` sul profilo a 4096 bit.
+fn run_cubic_verify_wide(args: &[String]) -> u8 {
+    let (opts, early) = parse_wide_options(args, "verify");
+    if let Some(code) = early {
+        return code;
+    }
+    let a = match opts.a {
+        Some(v) => v,
+        None => {
+            eprintln!("error: --a <A> is required");
+            return 1;
+        }
+    };
+    let b = match opts.b {
+        Some(v) => v,
+        None => {
+            eprintln!("error: --b <B> is required");
+            return 1;
+        }
+    };
+    let p = match opts.modulus {
+        Some(v) if v >= U4096::TWO => v,
+        _ => {
+            eprintln!("error: --modulus <P> (P >= 2) is required");
+            return 1;
+        }
+    };
+
+    let curve = match classify_curve_4096(&a, &b, &p) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}", wide_curve_error_message(&e));
+            return 1;
+        }
+    };
+
+    let three = U4096::THREE;
+    let is_type_one = curve.a.is_zero() && curve.modulus.rem(&three) == U4096::TWO;
+    let (class_label, expected_order) = match &curve.class {
+        CurveClass4096::CmSupersingular { closed_form_order } => (
+            if is_type_one {
+                "CmSupersingular I"
+            } else {
+                "CmSupersingular II"
+            },
+            *closed_form_order,
+        ),
+        _ => ("StandardElliptic", p.add(&U4096::ONE).0),
+    };
+
+    let points = sample_points_4096(&curve, opts.points);
+    if points.is_empty() {
+        eprintln!("error: failed to sample points on curve");
+        return 1;
+    }
+
+    let mut point_results: Vec<(usize, String, String, bool)> = Vec::new();
+    let mut all_passed = true;
+    for (i, (px, py)) in points.iter().enumerate() {
+        let pt = Point4096::Affine(*px, *py);
+        let res = scalar_mul_4096(pt, &expected_order, &curve.a, &p);
+        let passed = matches!(res, PointOpResult4096::Success(Point4096::Infinity));
+        if !passed {
+            all_passed = false;
+        }
+        point_results.push((i + 1, px.to_dec_string(), py.to_dec_string(), passed));
+    }
+
+    let passed_count = point_results.iter().filter(|r| r.3).count();
+    let total_count = point_results.len();
+
+    if opts.format == "json" {
+        let class_json = match &curve.class {
+            CurveClass4096::CmSupersingular { .. } => {
+                if is_type_one {
+                    "CmSupersingularType1"
+                } else {
+                    "CmSupersingularType2"
+                }
+            }
+            other => other.name(),
+        };
+        let pts_json = point_results
+            .iter()
+            .map(|(idx, px, py, passed)| {
+                format!(
+                    "{{\"point_index\":{},\"x\":{},\"y\":{},\"status\":\"{}\"}}",
+                    idx,
+                    px,
+                    py,
+                    if *passed { "PASSED" } else { "FAILED" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        println!(
+            "{{\"curve\":{{\"a\":{},\"b\":{},\"modulus\":{}}},\"class\":\"{}\",\"expected_order\":{},\"points\":[{}],\"global_status\":\"{}\",\"passed\":{},\"total\":{}}}",
+            curve.a.to_dec_string(),
+            curve.b.to_dec_string(),
+            p.to_dec_string(),
+            class_json,
+            expected_order.to_dec_string(),
+            pts_json,
+            if all_passed { "CERTIFICATO" } else { "FALLITO" },
+            passed_count,
+            total_count
+        );
+    } else {
+        let modulus_s = p.to_dec_string();
+        let curve_eq = if curve.a.is_zero() {
+            format!("y^2 = x^3 + {} mod {}", curve.b.to_dec_string(), modulus_s)
+        } else if curve.b.is_zero() {
+            format!("y^2 = x^3 + {}x mod {}", curve.a.to_dec_string(), modulus_s)
+        } else {
+            format!(
+                "y^2 = x^3 + {}x + {} mod {}",
+                curve.a.to_dec_string(),
+                curve.b.to_dec_string(),
+                modulus_s
+            )
+        };
+        println!(
+            "Verifica Ordine Curva: {} (Classe: {})",
+            curve_eq, class_label
+        );
+        println!("Ordine teorico atteso: {}", expected_order.to_dec_string());
+        let rows = point_results
+            .iter()
+            .map(|(idx, px, py, passed)| {
+                vec![
+                    idx.to_string(),
+                    px.clone(),
+                    py.clone(),
+                    if *passed {
+                        "PASSED".to_string()
+                    } else {
+                        "FAILED".to_string()
+                    },
+                ]
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "{}",
+            wide_grid(&["Punto #", "Coordinata X", "Coordinata Y", "Esito"], &rows)
+        );
+        let order_s = expected_order.to_dec_string();
+        if all_passed {
+            println!(
+                "Esito Globale: CERTIFICATO ({}/{} punti soddisfano [{}]P = O)",
+                passed_count, total_count, order_s
+            );
+        } else {
+            println!(
+                "Esito Globale: NON CERTIFICATO ({}/{} punti soddisfano [{}]P = O)",
+                passed_count, total_count, order_s
+            );
+        }
+    }
+
+    if all_passed {
+        0
+    } else {
+        1
+    }
+}
+
+/// `kronoprime cubic factor-probe` sul profilo a 4096 bit.
+fn run_cubic_factor_probe_wide(args: &[String]) -> u8 {
+    let (opts, early) = parse_wide_options(args, "factor-probe");
+    if let Some(code) = early {
+        return code;
+    }
+    let n = match opts.modulus {
+        Some(v) if v >= U4096::TWO => v,
+        _ => {
+            eprintln!("error: --modulus <N> (N >= 2) is required");
+            return 1;
+        }
+    };
+
+    match cubic_factor_probe_4096(&n, opts.limit) {
+        Some(res) => {
+            if opts.format == "table" {
+                println!(
+                    "{}",
+                    wide_table(&[
+                        ("Status", "FactorFound".to_string()),
+                        ("Modulo n", n.to_dec_string()),
+                        ("Fattore 1", res.factor1.to_dec_string()),
+                        ("Fattore 2", res.factor2.to_dec_string()),
+                        (
+                            "Curva (a,b)",
+                            format!("a={}, b={}", res.a.to_dec_string(), res.b.to_dec_string()),
+                        ),
+                        ("Meccanismo", res.mechanism.to_string()),
+                    ])
+                );
+            } else {
+                println!(
+                    "{{\n  \"status\": \"FactorFound\",\n  \"modulus\": {},\n  \"factor1\": {},\n  \"factor2\": {},\n  \"source_curve\": {{ \"a\": {}, \"b\": {} }},\n  \"mechanism\": \"{}\"\n}}",
+                    n.to_dec_string(),
+                    res.factor1.to_dec_string(),
+                    res.factor2.to_dec_string(),
+                    res.a.to_dec_string(),
+                    res.b.to_dec_string(),
+                    res.mechanism
+                );
+            }
+            2
+        }
+        None => {
+            if opts.format == "table" {
+                println!(
+                    "Status: FactorNotFound (nessun fattore individuato entro limit={})",
+                    opts.limit
+                );
+            } else {
+                println!(
+                    "{{\n  \"status\": \"FactorNotFound\",\n  \"modulus\": {},\n  \"limit\": {}\n}}",
+                    n.to_dec_string(),
+                    opts.limit
+                );
+            }
+            0
+        }
+    }
+}
+
+/// `kronoprime cubic point-ops` sul profilo a 4096 bit.
+fn run_cubic_point_ops_wide(args: &[String]) -> u8 {
+    let (opts, early) = parse_wide_options(args, "point-ops");
+    if let Some(code) = early {
+        return code;
+    }
+    let a = match opts.a {
+        Some(v) => v,
+        None => {
+            eprintln!("error: --a <A> is required");
+            return 1;
+        }
+    };
+    let b = match opts.b {
+        Some(v) => v,
+        None => {
+            eprintln!("error: --b <B> is required");
+            return 1;
+        }
+    };
+    let n = match opts.modulus {
+        Some(v) if v >= U4096::TWO => v,
+        _ => {
+            eprintln!("error: --modulus <N> (N >= 2) is required");
+            return 1;
+        }
+    };
+    let pt_s = match opts.point {
+        Some(s) => s,
+        None => {
+            eprintln!("error: --point \"<X,Y>\" is required");
+            return 1;
+        }
+    };
+
+    let pt = if pt_s.trim().eq_ignore_ascii_case("o") || pt_s.trim().eq_ignore_ascii_case("inf") {
+        Point4096::Infinity
+    } else {
+        let mut coords: Vec<U4096> = Vec::new();
+        let mut token = String::new();
+        for ch in pt_s.chars() {
+            if ch.is_ascii_digit() {
+                token.push(ch);
+            } else if !token.is_empty() {
+                if let Ok(v) = U4096::from_dec(&token) {
+                    coords.push(v);
+                }
+                token.clear();
+            }
+        }
+        if !token.is_empty() {
+            if let Ok(v) = U4096::from_dec(&token) {
+                coords.push(v);
+            }
+        }
+        if coords.len() != 2 {
+            eprintln!("error: coordinate del punto non valide: attese due coordinate (X,Y)");
+            return 1;
+        }
+        Point4096::Affine(coords[0], coords[1])
+    };
+
+    if !is_on_curve_4096(&pt, &a, &b, &n) {
+        eprintln!("error: il punto non appartiene alla curva specificata");
+        return 1;
+    }
+
+    let k = opts.scalar.unwrap_or(U4096::ONE);
+    match scalar_mul_4096(pt, &k, &a, &n) {
+        PointOpResult4096::FactorFound(g) => {
+            eprintln!(
+                "Fattore non banale individuato tramite singolarità/inversione: {}",
+                g.to_dec_string()
+            );
+            2
+        }
+        PointOpResult4096::Success(res_pt) => {
+            let res_label = match res_pt {
+                Point4096::Infinity => "PointAtInfinity (O)".to_string(),
+                Point4096::Affine(rx, ry) => {
+                    format!("({}, {})", rx.to_dec_string(), ry.to_dec_string())
+                }
+            };
+            let pt_label = match pt {
+                Point4096::Infinity => "O".to_string(),
+                Point4096::Affine(px, py) => {
+                    format!("({}, {})", px.to_dec_string(), py.to_dec_string())
+                }
+            };
+            let modulus_s = n.to_dec_string();
+            let curve_eq = if a.is_zero() {
+                format!("y^2 = x^3 + {} mod {}", b.to_dec_string(), modulus_s)
+            } else if b.is_zero() {
+                format!("y^2 = x^3 + {}x mod {}", a.to_dec_string(), modulus_s)
+            } else {
+                format!(
+                    "y^2 = x^3 + {}x + {} mod {}",
+                    a.to_dec_string(),
+                    b.to_dec_string(),
+                    modulus_s
+                )
+            };
+
+            if opts.format == "json" {
+                let res_json = match res_pt {
+                    Point4096::Infinity => "\"PointAtInfinity\"".to_string(),
+                    Point4096::Affine(rx, ry) => {
+                        format!("[{},{}]", rx.to_dec_string(), ry.to_dec_string())
+                    }
+                };
+                let pt_json = match pt {
+                    Point4096::Infinity => "\"O\"".to_string(),
+                    Point4096::Affine(px, py) => {
+                        format!("[{},{}]", px.to_dec_string(), py.to_dec_string())
+                    }
+                };
+                println!(
+                    "{{\"operation\":\"ScalarMultiplication\",\"curve\":{{\"a\":{},\"b\":{},\"modulus\":{}}},\"point\":{},\"scalar\":{},\"result\":{}}}",
+                    a.to_dec_string(),
+                    b.to_dec_string(),
+                    modulus_s,
+                    pt_json,
+                    k.to_dec_string(),
+                    res_json
+                );
+            } else {
+                println!(
+                    "Operazione: Moltiplicazione Scalare [{}]{} su {}",
+                    k.to_dec_string(),
+                    pt_label,
+                    curve_eq
+                );
+                println!("Risultato: {}", res_label);
+            }
+            0
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1288,5 +2242,32 @@ mod tests {
             .collect();
         // Exit code 1 flags the invalid input; the valid one is still printed.
         assert_eq!(run(&args), 1);
+    }
+
+    #[test]
+    fn wide_routing_follows_what_u128_cannot_read() {
+        // Il profilo narrow possiede i decimali entro u128::MAX...
+        assert!(!payload_needs_wide("1019"));
+        assert!(!payload_needs_wide("--point \"12,431\""));
+        // ...e tutto cio che il parser narrow non accetta ma U4096 si passa al
+        // profilo a 4096 bit, esadecimali compresi a qualunque larghezza.
+        assert!(payload_needs_wide("0x3FB"));
+        assert!(payload_needs_wide(
+            "1000000000000000000000000000000000000007"
+        ));
+        // Un token illeggibile per entrambi resta al narrow, che riporta il
+        // proprio errore senza chiamare il profilo largo.
+        assert!(!payload_needs_wide("0xZZ"));
+
+        let wide: Vec<String> = ["--modulus", "0x3FB"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(args_need_wide(&wide));
+        let narrow: Vec<String> = ["--modulus", "1019"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!args_need_wide(&narrow));
     }
 }

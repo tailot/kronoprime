@@ -7,7 +7,9 @@
 //! the final digits `+1`, `+3`, `+7`, `+9`.
 
 use crate::cubic::{classify_weierstrass, sub_mod, try_inv_mod, CubicCurve};
+use crate::cubic4096::{classify_curve_4096, Curve4096, CurveError4096};
 use crate::primality::{add_mod, is_prime, mul_mod};
+use crate::u4096::U4096;
 
 /// Final digits of the four active slots of every decade.
 pub const ACTIVE_SLOTS: [u8; 4] = [1, 3, 7, 9];
@@ -364,6 +366,218 @@ impl Matrix3x3CubicExt for [[u128; 3]; 3] {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The 4096-bit profile
+//
+// The decade machinery above is tied to decimal digits and therefore to the
+// `u128` window it can print. The invariants of a matrix are not: a trace, a sum
+// of principal minors and a determinant are just three residue classes, and the
+// characteristic polynomial they define can be depressed into Weierstrass
+// parameters `(a, b)` at any width. Everything below works on `U4096` cells with
+// a `U4096` modulus, keeps every product inside the wide buffer of `U4096`
+// itself, and never converts through a machine word.
+// ---------------------------------------------------------------------------
+
+/// A 3x3 matrix of `U4096` residues.
+pub type Matrix4096 = [[U4096; 3]; 3];
+
+/// What can go wrong while taking invariants or depressed parameters at width.
+// The payloads are full-width words and the point of the wide profile is to
+// stay stack-allocated, so the variants are kept unboxed on purpose.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MatrixError4096 {
+    /// The modulus is `0` or `1`: there is no residue ring to reduce into.
+    InvalidModulus,
+    /// `3` is not invertible modulo the modulus; the stored value is the gcd,
+    /// which for a composite modulus is a factor in disguise.
+    ThreeNotInvertible(U4096),
+    /// The cubic side rejected the curve; `EllipticCurveMethod`-style failures
+    /// carry the factor they found.
+    Curve(CurveError4096),
+}
+
+impl MatrixError4096 {
+    /// The message the command line prints for this failure.
+    pub fn message(&self) -> &'static str {
+        match self {
+            MatrixError4096::InvalidModulus => "Modulo non valido",
+            MatrixError4096::ThreeNotInvertible(_) => {
+                "Modulo non coprimo con 3 (impossibile invertire 3)"
+            }
+            MatrixError4096::Curve(CurveError4096::InvalidModulus) => "Modulo non valido",
+            MatrixError4096::Curve(CurveError4096::FactorFound { .. }) => {
+                "Fattore trovato durante la classificazione della curva"
+            }
+        }
+    }
+}
+
+/// Turns a `u128` matrix into wide cells, without touching their values.
+pub fn widen_matrix_3x3(m: &[[u128; 3]; 3]) -> Matrix4096 {
+    let mut out = [[U4096::ZERO; 3]; 3];
+    for r in 0..3 {
+        for c in 0..3 {
+            out[r][c] = U4096::from_u128(m[r][c]);
+        }
+    }
+    out
+}
+
+/// Computes `(trace, sigma2, determinant)` of a 3x3 matrix modulo `n`, all wide.
+///
+/// `sigma2` is the sum of the three principal `2x2` minors, so that
+/// `t^3 - trace * t^2 + sigma2 * t - det` is the characteristic polynomial.
+pub fn matrix_invariants_4096(m: &Matrix4096, n: &U4096) -> (U4096, U4096, U4096) {
+    if n <= &U4096::ONE {
+        return (U4096::ZERO, U4096::ZERO, U4096::ZERO);
+    }
+    let cell = |r: usize, c: usize| m[r][c].rem(n);
+    let minor = |a: usize, b: usize, c: usize, d: usize| {
+        cell(a, b)
+            .mul_mod(&cell(c, d), n)
+            .sub_mod(&cell(a, d).mul_mod(&cell(c, b), n), n)
+    };
+
+    let tr = cell(0, 0).add_mod(&cell(1, 1), n).add_mod(&cell(2, 2), n);
+
+    let m00 = minor(1, 1, 2, 2);
+    let m11 = minor(0, 0, 2, 2);
+    let m22 = minor(0, 0, 1, 1);
+    let sigma2 = m00.add_mod(&m11, n).add_mod(&m22, n);
+
+    let c01 = minor(1, 0, 2, 2);
+    let c02 = minor(1, 0, 2, 1);
+
+    let det = cell(0, 0)
+        .mul_mod(&m00, n)
+        .sub_mod(&cell(0, 1).mul_mod(&c01, n), n)
+        .add_mod(&cell(0, 2).mul_mod(&c02, n), n);
+
+    (tr, sigma2, det)
+}
+
+/// Multiply two wide 3x3 matrices modulo `n`.
+pub fn mat_mul_4096(a: &Matrix4096, b: &Matrix4096, n: &U4096) -> Matrix4096 {
+    let mut out = [[U4096::ZERO; 3]; 3];
+    if n <= &U4096::ONE {
+        return out;
+    }
+    for r in 0..3 {
+        for c in 0..3 {
+            let mut sum = U4096::ZERO;
+            for k in 0..3 {
+                sum = sum.add_mod(&a[r][k].rem(n).mul_mod(&b[k][c].rem(n), n), n);
+            }
+            out[r][c] = sum;
+        }
+    }
+    out
+}
+
+/// The wide analogue of [`compute_similar_matrix`]: `M' = P M P^-1` with the
+/// same unimodular `P`, so the invariants of `M` and `M'` agree by construction.
+pub fn compute_similar_matrix_4096(m: &Matrix4096, n: &U4096) -> Matrix4096 {
+    if n <= &U4096::ONE {
+        return [[U4096::ZERO; 3]; 3];
+    }
+    let one = U4096::ONE.rem(n);
+    let two = U4096::TWO.rem(n);
+    let minus_one = U4096::ONE.neg_mod(n);
+    let zero = U4096::ZERO;
+    let p = [[two, one, zero], [one, one, zero], [zero, zero, one]];
+    let p_inv = [
+        [one, minus_one, zero],
+        [minus_one, two, zero],
+        [zero, zero, one],
+    ];
+    mat_mul_4096(&mat_mul_4096(&p, m, n), &p_inv, n)
+}
+
+/// Depresses the characteristic polynomial of a wide matrix into the
+/// Weierstrass parameters `(a, b)` of `y^2 = x^3 + a x + b mod n`.
+#[allow(clippy::result_large_err)]
+pub fn depressed_params_4096(
+    m: &Matrix4096,
+    modulus: &U4096,
+) -> Result<(U4096, U4096), MatrixError4096> {
+    let n = modulus;
+    if n <= &U4096::ONE {
+        return Err(MatrixError4096::InvalidModulus);
+    }
+    let (tr, sigma2, det) = matrix_invariants_4096(m, n);
+
+    // Characteristic polynomial t^3 + c2 t^2 + c1 t + c0.
+    let c2 = tr.neg_mod(n);
+    let c1 = sigma2;
+    let c0 = det.neg_mod(n);
+
+    let inv3 = U4096::THREE
+        .try_inv_mod(n)
+        .map_err(MatrixError4096::ThreeNotInvertible)?;
+    let inv27 = inv3.mul_mod(&inv3, n).mul_mod(&inv3, n);
+
+    let c2_sq = c2.mul_mod(&c2, n);
+    let c2_cu = c2_sq.mul_mod(&c2, n);
+
+    // a = c1 - c2^2 / 3
+    let a = c1.sub_mod(&c2_sq.mul_mod(&inv3, n), n);
+    // b = c0 - c1 c2 / 3 + 2 c2^3 / 27
+    let term_mid = c1.mul_mod(&c2, n).mul_mod(&inv3, n);
+    let term_cubic = c2_cu.mul_mod(&U4096::TWO.rem(n), n).mul_mod(&inv27, n);
+    let b = c0.sub_mod(&term_mid, n).add_mod(&term_cubic, n);
+
+    Ok((a, b))
+}
+
+/// The wide analogue of [`Matrix3x3CubicExt::extract_cubic_curve`]: the matrix
+/// becomes a classified curve, and a composite modulus can hand back a factor.
+#[allow(clippy::result_large_err)]
+pub fn extract_cubic_curve_4096(
+    m: &Matrix4096,
+    modulus: &U4096,
+) -> Result<Curve4096, MatrixError4096> {
+    let (a, b) = depressed_params_4096(m, modulus)?;
+    classify_curve_4096(&a, &b, modulus).map_err(MatrixError4096::Curve)
+}
+
+/// Parses a wide 3x3 matrix in either of the two bracket styles accepted by
+/// [`parse_matrix_3x3`], with decimal or `0x` cells up to 4096 bits.
+pub fn parse_matrix_4096(s: &str) -> Result<Matrix4096, &'static str> {
+    let mut numbers: Vec<U4096> = Vec::new();
+    let mut token = String::new();
+    let flush = |token: &mut String, numbers: &mut Vec<U4096>| -> Result<(), &'static str> {
+        if token.is_empty() {
+            return Ok(());
+        }
+        match U4096::from_str(token) {
+            Ok(v) => {
+                numbers.push(v);
+                token.clear();
+                Ok(())
+            }
+            Err(_) => Err("Numero matrice non valido"),
+        }
+    };
+    for ch in s.chars() {
+        if ch.is_ascii_hexdigit() || ch == 'x' || ch == 'X' {
+            token.push(ch);
+        } else {
+            flush(&mut token, &mut numbers)?;
+        }
+    }
+    flush(&mut token, &mut numbers)?;
+
+    if numbers.len() != 9 {
+        return Err("Sintassi matrice non valida: attesi 9 elementi per matrice 3x3");
+    }
+    let mut out = [[U4096::ZERO; 3]; 3];
+    for (i, row) in out.iter_mut().enumerate() {
+        row.copy_from_slice(&numbers[i * 3..i * 3 + 3]);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +711,158 @@ mod tests {
         assert_eq!(curve.a, a1);
         assert_eq!(curve.b, b1);
         assert_eq!(curve.modulus, n);
+    }
+
+    fn scale_4096(m: &Matrix4096, s: &U4096, n: &U4096) -> Matrix4096 {
+        let mut out = [[U4096::ZERO; 3]; 3];
+        for r in 0..3 {
+            for c in 0..3 {
+                out[r][c] = m[r][c].mul_mod(s, n);
+            }
+        }
+        out
+    }
+
+    fn add_4096(a: &Matrix4096, b: &Matrix4096, n: &U4096) -> Matrix4096 {
+        let mut out = [[U4096::ZERO; 3]; 3];
+        for r in 0..3 {
+            for c in 0..3 {
+                out[r][c] = a[r][c].add_mod(&b[r][c], n);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn wide_matrix_invariants_match_the_narrow_path() {
+        let narrow = [
+            [12u128, 5u128, 7u128],
+            [3u128, 19u128, 2u128],
+            [8u128, 1u128, 30u128],
+        ];
+        let n128 = 1009u128;
+        let n = U4096::from_u128(n128);
+        let m = widen_matrix_3x3(&narrow);
+
+        let narrow_inv = matrix_invariants_3x3(&narrow, n128);
+        let wide_inv = matrix_invariants_4096(&m, &n);
+        assert_eq!(wide_inv.0.to_u128(), Some(narrow_inv.0));
+        assert_eq!(wide_inv.1.to_u128(), Some(narrow_inv.1));
+        assert_eq!(wide_inv.2.to_u128(), Some(narrow_inv.2));
+
+        let narrow_params = extract_depressed_params(&narrow, n128);
+        let (a, b) = depressed_params_4096(&m, &n).expect("1009 is coprime with 3");
+        assert_eq!(a.to_u128(), Some(narrow_params.0));
+        assert_eq!(b.to_u128(), Some(narrow_params.1));
+
+        let wide_similar = compute_similar_matrix_4096(&m, &n);
+        let narrow_similar = widen_matrix_3x3(&compute_similar_matrix(&narrow, n128));
+        for r in 0..3 {
+            for c in 0..3 {
+                assert_eq!(wide_similar[r][c], narrow_similar[r][c].rem(&n));
+            }
+        }
+    }
+
+    #[test]
+    fn wide_matrix_cayley_hamilton_and_similarity() {
+        // 10^39 + 7: beyond every u128 cell, odd, and coprime with 3, so the
+        // whole path runs in wide arithmetic with no narrow escape hatch.
+        let n = U4096::from_dec("1000000000000000000000000000000000000007").unwrap();
+        assert!(n > U4096::from_u128(u128::MAX));
+        assert!(n.is_odd());
+        assert_ne!(n.div_rem_u64(3).1, 0, "3 must stay invertible");
+        let m: Matrix4096 = [
+            [
+                U4096::from_dec("999999999999999999999999999999999999999").unwrap(),
+                U4096::from_u64(7),
+                U4096::from_u128(u128::MAX),
+            ],
+            [
+                U4096::from_u64(12345678901234567890),
+                U4096::from_dec("500000000000000000000000000000000000001").unwrap(),
+                U4096::from_u64(2),
+            ],
+            [
+                U4096::from_u64(999999999999999999),
+                U4096::from_u64(3),
+                U4096::from_dec("123456789012345678901234567890123456789").unwrap(),
+            ],
+        ];
+
+        let (tr, sigma2, det) = matrix_invariants_4096(&m, &n);
+        // Cayley-Hamilton: M^3 - trace M^2 + sigma2 M - det I = 0 mod n.
+        let m2 = mat_mul_4096(&m, &m, &n);
+        let m3 = mat_mul_4096(&m2, &m, &n);
+        let identity = [
+            [U4096::ONE.rem(&n), U4096::ZERO, U4096::ZERO],
+            [U4096::ZERO, U4096::ONE.rem(&n), U4096::ZERO],
+            [U4096::ZERO, U4096::ZERO, U4096::ONE.rem(&n)],
+        ];
+        let mut check = m3;
+        check = add_4096(&check, &scale_4096(&m2, &tr.neg_mod(&n), &n), &n);
+        check = add_4096(&check, &scale_4096(&m, &sigma2, &n), &n);
+        check = add_4096(&check, &scale_4096(&identity, &det.neg_mod(&n), &n), &n);
+        for row in check {
+            for cell in row {
+                assert!(cell.is_zero(), "Cayley-Hamilton broke on {cell}");
+            }
+        }
+
+        // Similar matrices share their parameters, and the curve agrees.
+        let (a, b) = depressed_params_4096(&m, &n).expect("invertible 3");
+        let similar = compute_similar_matrix_4096(&m, &n);
+        let (a2, b2) = depressed_params_4096(&similar, &n).expect("invertible 3");
+        assert_eq!((a, b), (a2, b2));
+        let curve = extract_cubic_curve_4096(&m, &n);
+        match curve {
+            Ok(curve) => {
+                assert_eq!(curve.a, a);
+                assert_eq!(curve.b, b);
+                assert_eq!(curve.modulus, n);
+            }
+            Err(MatrixError4096::Curve(CurveError4096::FactorFound { factor, cofactor })) => {
+                // A composite modulus can surface a factor on the way to the
+                // curve, and that factor really divides the wide modulus.
+                assert!(factor > U4096::ONE && factor < n);
+                assert!(cofactor > U4096::ONE && cofactor < n);
+                assert_eq!(n.rem(&factor), U4096::ZERO);
+            }
+            Err(other) => panic!("unexpected refusal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wide_matrix_parsing_and_refusals() {
+        let big = "3402823669209384634633746074317682114583";
+        let a = parse_matrix_4096(&format!("[1,2,3; 4,5,6; 7,8,{big}]")).unwrap();
+        let b = parse_matrix_4096(&format!("[[1,2,3],[4,5,6],[7,8,{big}]]")).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a[2][2], U4096::from_dec(big).unwrap());
+        assert_eq!(
+            parse_matrix_4096("[1,2,3; 4,5,6; 7,8]").err(),
+            Some("Sintassi matrice non valida: attesi 9 elementi per matrice 3x3")
+        );
+        // A cell wider than the type is refused rather than silently truncated.
+        assert!(U4096::from_hex(&"f".repeat(1024)).is_ok());
+        assert!(U4096::from_dec(&"9".repeat(1240)).is_err());
+        assert!(parse_matrix_4096(&format!("[{}{}]", "9".repeat(1240), "1")).is_err());
+
+        assert_eq!(
+            depressed_params_4096(&a, &U4096::ONE).err(),
+            Some(MatrixError4096::InvalidModulus)
+        );
+        assert_eq!(
+            depressed_params_4096(&a, &U4096::ZERO).err(),
+            Some(MatrixError4096::InvalidModulus)
+        );
+        // 3057 = 3 * 1019: 3 is not invertible, and the gcd names the factor.
+        let err = depressed_params_4096(&a, &U4096::from_u64(3057))
+            .expect_err("3 is not invertible mod 3057");
+        assert_eq!(err, MatrixError4096::ThreeNotInvertible(U4096::from_u64(3)));
+        assert_eq!(
+            err.message(),
+            "Modulo non coprimo con 3 (impossibile invertire 3)"
+        );
     }
 }
