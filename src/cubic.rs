@@ -329,7 +329,7 @@ pub fn classify_weierstrass(a: u128, b: u128, n: u128) -> Result<CubicCurve, &'s
             })
         }
     } else if g > 1 && g < n {
-        Err("Fattore non banale individuato durante il calcolo del discriminante")
+        Err("Nontrivial factor found while computing the discriminant")
     } else {
         // Curve regolari (g == 1)
         let class = if (a_mod == 0 && n % 3 == 2) || (b_mod == 0 && n % 4 == 3) {

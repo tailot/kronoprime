@@ -290,18 +290,18 @@ Here the composite is fed to the *curve* layer as a modulus. Before any heavy ma
 ```
 
 ```text
-Verifica Ordine Curva: y^2 = x^3 + 5 mod 1019 (Classe: CmSupersingular I)
-Ordine teorico atteso: 1020
+Curve order verification: y^2 = x^3 + 5 mod 1019 (class: CmSupersingular I)
+Expected theoretical order: 1020
 +---------+--------------+--------------+--------+
-| Punto # | Coordinata X | Coordinata Y | Esito  |
+| Point # | X coordinate | Y coordinate | Result |
 +---------+--------------+--------------+--------+
 | 1       | 0            | 987          | PASSED |
 | 2       | 0            | 32           | PASSED |
 +---------+--------------+--------------+--------+
-Esito Globale: CERTIFICATO (2/2 punti soddisfano [1020]P = O)
+Overall result: CERTIFIED (2/2 points satisfy [1020]P = O)
 ```
 
-Nothing here is big - `0x3FB` is just 1019 in hexadecimal - but the `0x` prefix is a token the `u128` parser refuses, so the routing rule kicks in automatically and the *entire* subcommand runs on the 4096-bit engine (`U4096` + `cubic4096`): no flag asked, same table shape, same exit codes. The math: since `1019 = 2 (mod 3)`, `y^2 = x^3 + 5` is a CM supersingular curve (`j = 0` family) with expected order `p + 1 = 1020`, and certification means annihilating sampled points: `[1020]P = O`. The two sampled points share `x = 0` (then `y^2 = 5` has the conjugate roots 32 and `987 = 1019 - 32`), both `PASSED`, so `CERTIFICATO` and exit code 0.
+Nothing here is big - `0x3FB` is just 1019 in hexadecimal - but the `0x` prefix is a token the `u128` parser refuses, so the routing rule kicks in automatically and the *entire* subcommand runs on the 4096-bit engine (`U4096` + `cubic4096`): no flag asked, same table shape, same exit codes. The math: since `1019 = 2 (mod 3)`, `y^2 = x^3 + 5` is a CM supersingular curve (`j = 0` family) with expected order `p + 1 = 1020`, and certification means annihilating sampled points: `[1020]P = O`. The two sampled points share `x = 0` (then `y^2 = 5` has the conjugate roots 32 and `987 = 1019 - 32`), both `PASSED`, so `Overall result: CERTIFIED` and exit code 0.
 
 ## Code structure and quality
 

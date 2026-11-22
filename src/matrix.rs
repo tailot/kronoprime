@@ -292,7 +292,7 @@ pub fn parse_matrix_3x3(s: &str) -> Result<[[u128; 3]; 3], &'static str> {
             if let Ok(v) = current_num.parse::<u128>() {
                 numbers.push(v);
             } else {
-                return Err("Numero matrice non valido");
+                return Err("Invalid matrix number");
             }
             current_num.clear();
         }
@@ -301,12 +301,12 @@ pub fn parse_matrix_3x3(s: &str) -> Result<[[u128; 3]; 3], &'static str> {
         if let Ok(v) = current_num.parse::<u128>() {
             numbers.push(v);
         } else {
-            return Err("Numero matrice non valido");
+            return Err("Invalid matrix number");
         }
     }
 
     if numbers.len() != 9 {
-        return Err("Sintassi matrice non valida: attesi 9 elementi per matrice 3x3");
+        return Err("Invalid matrix syntax: expected 9 entries for a 3x3 matrix");
     }
 
     Ok([
@@ -329,7 +329,7 @@ impl Matrix3x3CubicExt for [[u128; 3]; 3] {
     fn to_depressed_cubic(&self, modulus: u128) -> Result<(u128, u128), &'static str> {
         let n = modulus;
         if n <= 1 {
-            return Err("Modulo non valido");
+            return Err("Invalid modulus");
         }
 
         let (tr, sigma2, det) = matrix_invariants_3x3(self, n);
@@ -342,7 +342,7 @@ impl Matrix3x3CubicExt for [[u128; 3]; 3] {
         // Inverses of 3 and 27
         let inv3 = match try_inv_mod(3, n) {
             Ok(inv) => inv,
-            Err(_) => return Err("Modulo non coprimo con 3 (impossibile invertire 3)"),
+            Err(_) => return Err("Modulus not coprime with 3 (cannot invert 3)"),
         };
         let inv27 = mul_mod(mul_mod(inv3, inv3, n), inv3, n);
 
@@ -401,13 +401,13 @@ impl MatrixError4096 {
     /// The message the command line prints for this failure.
     pub fn message(&self) -> &'static str {
         match self {
-            MatrixError4096::InvalidModulus => "Modulo non valido",
+            MatrixError4096::InvalidModulus => "Invalid modulus",
             MatrixError4096::ThreeNotInvertible(_) => {
-                "Modulo non coprimo con 3 (impossibile invertire 3)"
+                "Modulus not coprime with 3 (cannot invert 3)"
             }
-            MatrixError4096::Curve(CurveError4096::InvalidModulus) => "Modulo non valido",
+            MatrixError4096::Curve(CurveError4096::InvalidModulus) => "Invalid modulus",
             MatrixError4096::Curve(CurveError4096::FactorFound { .. }) => {
-                "Fattore trovato durante la classificazione della curva"
+                "Factor found during curve classification"
             }
         }
     }
@@ -556,7 +556,7 @@ pub fn parse_matrix_4096(s: &str) -> Result<Matrix4096, &'static str> {
                 token.clear();
                 Ok(())
             }
-            Err(_) => Err("Numero matrice non valido"),
+            Err(_) => Err("Invalid matrix number"),
         }
     };
     for ch in s.chars() {
@@ -569,7 +569,7 @@ pub fn parse_matrix_4096(s: &str) -> Result<Matrix4096, &'static str> {
     flush(&mut token, &mut numbers)?;
 
     if numbers.len() != 9 {
-        return Err("Sintassi matrice non valida: attesi 9 elementi per matrice 3x3");
+        return Err("Invalid matrix syntax: expected 9 entries for a 3x3 matrix");
     }
     let mut out = [[U4096::ZERO; 3]; 3];
     for (i, row) in out.iter_mut().enumerate() {
@@ -841,7 +841,7 @@ mod tests {
         assert_eq!(a[2][2], U4096::from_dec(big).unwrap());
         assert_eq!(
             parse_matrix_4096("[1,2,3; 4,5,6; 7,8]").err(),
-            Some("Sintassi matrice non valida: attesi 9 elementi per matrice 3x3")
+            Some("Invalid matrix syntax: expected 9 entries for a 3x3 matrix")
         );
         // A cell wider than the type is refused rather than silently truncated.
         assert!(U4096::from_hex(&"f".repeat(1024)).is_ok());
@@ -862,7 +862,7 @@ mod tests {
         assert_eq!(err, MatrixError4096::ThreeNotInvertible(U4096::from_u64(3)));
         assert_eq!(
             err.message(),
-            "Modulo non coprimo con 3 (impossibile invertire 3)"
+            "Modulus not coprime with 3 (cannot invert 3)"
         );
     }
 }

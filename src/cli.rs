@@ -462,7 +462,7 @@ fn run_cubic_scan(args: &[String]) -> u8 {
                         "{{\n  \"status\": \"FactorFound\",\n  \"modulus\": {n},\n  \"factor1\": {f1},\n  \"factor2\": {f2}\n}}"
                     );
                 } else {
-                    println!("Fattore non banale individuato: {f1} (n = {f1} * {f2})");
+                    println!("Nontrivial factor found: {f1} (n = {f1} * {f2})");
                 }
                 return 2;
             }
@@ -581,7 +581,7 @@ fn run_cubic_scan(args: &[String]) -> u8 {
         println!("[\n{items}\n]");
     } else {
         println!("+-------+-------+---------+-------------------+---------------------+");
-        println!("| Param a | Param b | Modulo n| Classe Algebrica  | Ordine Chiuso (#E)  |");
+        println!("| Param a | Param b | Modulo n| Algebraic class   | Closed order (#E)  |");
         println!("+-------+-------+---------+-------------------+---------------------+");
         for c in &curves {
             let (class_label, order_label) = match &c.class {
@@ -691,7 +691,7 @@ fn run_cubic_from_matrix(args: &[String]) -> u8 {
         Err(e) => {
             let g = gcd(3, n);
             if g > 1 && g < n {
-                eprintln!("Fattore non banale individuato durante l'inversione: {g}");
+                eprintln!("Nontrivial factor found during inversion: {g}");
                 return 2;
             }
             eprintln!("error: {e}");
@@ -704,7 +704,7 @@ fn run_cubic_from_matrix(args: &[String]) -> u8 {
         Err(e) => {
             let (_, status) = eval_discriminant(a, b, n);
             if let DiscriminantStatus::FactorFound(g) = status {
-                eprintln!("Fattore non banale individuato dal discriminante: {g}");
+                eprintln!("Nontrivial factor found from the discriminant: {g}");
                 return 2;
             }
             eprintln!("error: {e}");
@@ -725,17 +725,17 @@ fn run_cubic_from_matrix(args: &[String]) -> u8 {
         );
     } else {
         println!("+-------------------+---------------------------------------------+");
-        println!("| Proprietà         | Valore                                      |");
+        println!("| Property          | Value                                       |");
         println!("+-------------------+---------------------------------------------+");
-        println!("| Matrice Ingresso  | {:<43} |", formatted_matrix);
+        println!("| Input matrix      | {:<43} |", formatted_matrix);
         println!("| Modulo n          | {:<43} |", n);
         println!(
-            "| Invarianti        | tr={}, sigma2={}, det={} |",
+            "| Invariants        | tr={}, sigma2={}, det={} |",
             tr, sigma2, det
         );
         println!("| Weierstrass (a,b) | a={}, b={} |", a, b);
-        println!("| Discriminante     | {:<43} |", curve.discriminant);
-        println!("| Classe Algebrica  | {:<43} |", class_str);
+        println!("| Discriminant      | {:<43} |", curve.discriminant);
+        println!("| Algebraic class   | {:<43} |", class_str);
         println!("+-------------------+---------------------------------------------+");
     }
 
@@ -922,7 +922,7 @@ fn run_cubic_verify(args: &[String]) -> u8 {
             class_json,
             expected_order,
             pts_json,
-            if all_passed { "CERTIFICATO" } else { "FALLITO" },
+            if all_passed { "CERTIFIED" } else { "FAILED" },
             passed_count,
             total_count
         );
@@ -935,12 +935,12 @@ fn run_cubic_verify(args: &[String]) -> u8 {
             format!("y^2 = x^3 + {}x + {} mod {}", a, b, p)
         };
         println!(
-            "Verifica Ordine Curva: {} (Classe: {})",
+            "Curve order verification: {} (class: {})",
             curve_eq, class_label
         );
-        println!("Ordine teorico atteso: {}", expected_order);
+        println!("Expected theoretical order: {}", expected_order);
         println!("+---------+---------------+-----------------+--------+");
-        println!("| Punto # | Coordinata X  | Coordinata Y    | Esito  |");
+        println!("| Point # | X coordinate  | Y coordinate    | Result |");
         println!("+---------+---------------+-----------------+--------+");
         for (idx, px, py, passed) in &point_results {
             println!(
@@ -954,12 +954,12 @@ fn run_cubic_verify(args: &[String]) -> u8 {
         println!("+---------+---------------+-----------------+--------+");
         if all_passed {
             println!(
-                "Esito Globale: CERTIFICATO ({}/{} punti soddisfano [{}]P = O)",
+                "Overall result: CERTIFIED ({}/{} points satisfy [{}]P = O)",
                 passed_count, total_count, expected_order
             );
         } else {
             println!(
-                "Esito Globale: NON CERTIFICATO ({}/{} punti soddisfano [{}]P = O)",
+                "Overall result: NOT CERTIFIED ({}/{} points satisfy [{}]P = O)",
                 passed_count, total_count, expected_order
             );
         }
@@ -1039,14 +1039,14 @@ fn run_cubic_factor_probe(args: &[String]) -> u8 {
         Some(res) => {
             if format_mode == "table" {
                 println!("+-------------+------------------------------------+");
-                println!("| Proprietà   | Valore                             |");
+                println!("| Property    | Value                              |");
                 println!("+-------------+------------------------------------+");
                 println!("| Status      | FactorFound                        |");
                 println!("| Modulo n    | {:<34} |", n);
-                println!("| Fattore 1   | {:<34} |", res.factor1);
-                println!("| Fattore 2   | {:<34} |", res.factor2);
-                println!("| Curva (a,b) | a={}, b={} |", res.a, res.b);
-                println!("| Meccanismo  | {:<34} |", res.mechanism);
+                println!("| Factor 1    | {:<34} |", res.factor1);
+                println!("| Factor 2    | {:<34} |", res.factor2);
+                println!("| Curve (a,b) | a={}, b={} |", res.a, res.b);
+                println!("| Mechanism   | {:<34} |", res.mechanism);
                 println!("+-------------+------------------------------------+");
             } else {
                 println!(
@@ -1058,7 +1058,7 @@ fn run_cubic_factor_probe(args: &[String]) -> u8 {
         }
         None => {
             if format_mode == "table" {
-                println!("Status: FactorNotFound (nessun fattore individuato entro limit={limit})");
+                println!("Status: FactorNotFound (no factor found within limit={limit})");
             } else {
                 println!(
                     "{{\n  \"status\": \"FactorNotFound\",\n  \"modulus\": {},\n  \"limit\": {}\n}}",
@@ -1209,14 +1209,14 @@ fn run_cubic_point_ops(args: &[String]) -> u8 {
             }
         }
         if digits.len() != 2 {
-            eprintln!("error: coordinate del punto non valide: attese due coordinate (X,Y)");
+            eprintln!("error: invalid point coordinates: expected two coordinates (X,Y)");
             return 1;
         }
         ECPoint::Affine(digits[0], digits[1])
     };
 
     if !is_on_curve(&pt, a, b, n) {
-        eprintln!("error: il punto non appartiene alla curva specificata");
+        eprintln!("error: the point does not lie on the specified curve");
         return 1;
     }
 
@@ -1225,7 +1225,7 @@ fn run_cubic_point_ops(args: &[String]) -> u8 {
 
     match op_res {
         PointOpResult::FactorFound(g) => {
-            eprintln!("Fattore non banale individuato tramite singolarità/inversione: {g}");
+            eprintln!("Nontrivial factor found via singularity/inversion: {g}");
             2
         }
         PointOpResult::Success(res_pt) => {
@@ -1260,10 +1260,10 @@ fn run_cubic_point_ops(args: &[String]) -> u8 {
                 );
             } else {
                 println!(
-                    "Operazione: Moltiplicazione Scalare [{}]{} su {}",
+                    "Operation: scalar multiplication [{}]{} on {}",
                     k, pt_label, curve_eq
                 );
-                println!("Risultato: {}", res_label);
+                println!("Result: {}", res_label);
             }
             0
         }
@@ -1441,7 +1441,7 @@ fn print_wide_usage(sub: &str) {
         _ => "Usage: kronoprime cubic point-ops --a <A> --b <B> --modulus <N> --point \"<X,Y>\" [--scalar <K>] [--format json|table]",
     };
     println!("{line}");
-    println!("(i valori oltre u128 sono gestiti dal profilo a 4096 bit)");
+    println!("(values beyond u128 are handled by the 4096-bit profile)");
 }
 
 /// Tabella a due colonne il cui spazio cresce in funzione della cella più
@@ -1490,7 +1490,7 @@ fn wide_grid(header: &[&str], rows: &[Vec<String>]) -> String {
 /// Tabella `Proprietà`/`Valore` usata dai referti wide.
 fn wide_table(rows: &[(&str, String)]) -> String {
     wide_grid(
-        &["Proprietà", "Valore"],
+        &["Property", "Value"],
         &rows
             .iter()
             .map(|(k, v)| vec![k.to_string(), v.clone()])
@@ -1502,9 +1502,9 @@ fn wide_table(rows: &[(&str, String)]) -> String {
 /// narrow: un fattore intercettato resta un errore, ma viene nominato.
 fn wide_curve_error_message(err: &CurveError4096) -> String {
     match err {
-        CurveError4096::InvalidModulus => "Modulo non valido".to_string(),
+        CurveError4096::InvalidModulus => "Invalid modulus".to_string(),
         CurveError4096::FactorFound { factor, cofactor } => format!(
-            "Fattore non banale individuato: {} (n = {} * {})",
+            "Nontrivial factor found: {} (n = {} * {})",
             factor.to_dec_string(),
             factor.to_dec_string(),
             cofactor.to_dec_string()
@@ -1542,7 +1542,7 @@ fn run_cubic_scan_wide(args: &[String]) -> u8 {
                     );
                 } else {
                     println!(
-                        "Fattore non banale individuato: {} (n = {} * {})",
+                        "Nontrivial factor found: {} (n = {} * {})",
                         f1.to_dec_string(),
                         f1.to_dec_string(),
                         f2.to_dec_string()
@@ -1698,8 +1698,8 @@ fn run_cubic_scan_wide(args: &[String]) -> u8 {
                     "Param a",
                     "Param b",
                     "Modulo n",
-                    "Classe Algebrica",
-                    "Ordine Chiuso (#E)"
+                    "Algebraic class",
+                    "Closed order (#E)"
                 ],
                 &rows
             )
@@ -1743,7 +1743,7 @@ fn run_cubic_from_matrix_wide(args: &[String]) -> u8 {
         Err(MatrixError4096::ThreeNotInvertible(g)) => {
             if g > U4096::ONE && g < n {
                 eprintln!(
-                    "Fattore non banale individuato durante l'inversione: {}",
+                    "Nontrivial factor found during inversion: {}",
                     g.to_dec_string()
                 );
                 return 2;
@@ -1764,7 +1764,7 @@ fn run_cubic_from_matrix_wide(args: &[String]) -> u8 {
         Ok(c) => c,
         Err(MatrixError4096::Curve(CurveError4096::FactorFound { factor, .. })) => {
             eprintln!(
-                "Fattore non banale individuato dal discriminante: {}",
+                "Nontrivial factor found from the discriminant: {}",
                 factor.to_dec_string()
             );
             return 2;
@@ -1811,15 +1811,15 @@ fn run_cubic_from_matrix_wide(args: &[String]) -> u8 {
         println!(
             "{}",
             wide_table(&[
-                ("Matrice Ingresso", formatted_matrix),
+                ("Input matrix", formatted_matrix),
                 ("Modulo n", n.to_dec_string()),
-                ("Invarianti", invariants),
+                ("Invariants", invariants),
                 (
                     "Weierstrass (a,b)",
                     format!("a={}, b={}", a.to_dec_string(), b.to_dec_string()),
                 ),
-                ("Discriminante", curve.discriminant.to_dec_string()),
-                ("Classe Algebrica", class_str.to_string()),
+                ("Discriminant", curve.discriminant.to_dec_string()),
+                ("Algebraic class", class_str.to_string()),
             ])
         );
     }
@@ -1930,7 +1930,7 @@ fn run_cubic_verify_wide(args: &[String]) -> u8 {
             class_json,
             expected_order.to_dec_string(),
             pts_json,
-            if all_passed { "CERTIFICATO" } else { "FALLITO" },
+            if all_passed { "CERTIFIED" } else { "FAILED" },
             passed_count,
             total_count
         );
@@ -1949,10 +1949,13 @@ fn run_cubic_verify_wide(args: &[String]) -> u8 {
             )
         };
         println!(
-            "Verifica Ordine Curva: {} (Classe: {})",
+            "Curve order verification: {} (class: {})",
             curve_eq, class_label
         );
-        println!("Ordine teorico atteso: {}", expected_order.to_dec_string());
+        println!(
+            "Expected theoretical order: {}",
+            expected_order.to_dec_string()
+        );
         let rows = point_results
             .iter()
             .map(|(idx, px, py, passed)| {
@@ -1970,17 +1973,20 @@ fn run_cubic_verify_wide(args: &[String]) -> u8 {
             .collect::<Vec<_>>();
         println!(
             "{}",
-            wide_grid(&["Punto #", "Coordinata X", "Coordinata Y", "Esito"], &rows)
+            wide_grid(
+                &["Point #", "X coordinate", "Y coordinate", "Result"],
+                &rows
+            )
         );
         let order_s = expected_order.to_dec_string();
         if all_passed {
             println!(
-                "Esito Globale: CERTIFICATO ({}/{} punti soddisfano [{}]P = O)",
+                "Overall result: CERTIFIED ({}/{} points satisfy [{}]P = O)",
                 passed_count, total_count, order_s
             );
         } else {
             println!(
-                "Esito Globale: NON CERTIFICATO ({}/{} punti soddisfano [{}]P = O)",
+                "Overall result: NOT CERTIFIED ({}/{} points satisfy [{}]P = O)",
                 passed_count, total_count, order_s
             );
         }
@@ -2015,13 +2021,13 @@ fn run_cubic_factor_probe_wide(args: &[String]) -> u8 {
                     wide_table(&[
                         ("Status", "FactorFound".to_string()),
                         ("Modulo n", n.to_dec_string()),
-                        ("Fattore 1", res.factor1.to_dec_string()),
-                        ("Fattore 2", res.factor2.to_dec_string()),
+                        ("Factor 1", res.factor1.to_dec_string()),
+                        ("Factor 2", res.factor2.to_dec_string()),
                         (
-                            "Curva (a,b)",
+                            "Curve (a,b)",
                             format!("a={}, b={}", res.a.to_dec_string(), res.b.to_dec_string()),
                         ),
-                        ("Meccanismo", res.mechanism.to_string()),
+                        ("Mechanism", res.mechanism.to_string()),
                     ])
                 );
             } else {
@@ -2040,7 +2046,7 @@ fn run_cubic_factor_probe_wide(args: &[String]) -> u8 {
         None => {
             if opts.format == "table" {
                 println!(
-                    "Status: FactorNotFound (nessun fattore individuato entro limit={})",
+                    "Status: FactorNotFound (no factor found within limit={})",
                     opts.limit
                 );
             } else {
@@ -2111,14 +2117,14 @@ fn run_cubic_point_ops_wide(args: &[String]) -> u8 {
             }
         }
         if coords.len() != 2 {
-            eprintln!("error: coordinate del punto non valide: attese due coordinate (X,Y)");
+            eprintln!("error: invalid point coordinates: expected two coordinates (X,Y)");
             return 1;
         }
         Point4096::Affine(coords[0], coords[1])
     };
 
     if !is_on_curve_4096(&pt, &a, &b, &n) {
-        eprintln!("error: il punto non appartiene alla curva specificata");
+        eprintln!("error: the point does not lie on the specified curve");
         return 1;
     }
 
@@ -2126,7 +2132,7 @@ fn run_cubic_point_ops_wide(args: &[String]) -> u8 {
     match scalar_mul_4096(pt, &k, &a, &n) {
         PointOpResult4096::FactorFound(g) => {
             eprintln!(
-                "Fattore non banale individuato tramite singolarità/inversione: {}",
+                "Nontrivial factor found via singularity/inversion: {}",
                 g.to_dec_string()
             );
             2
@@ -2182,12 +2188,12 @@ fn run_cubic_point_ops_wide(args: &[String]) -> u8 {
                 );
             } else {
                 println!(
-                    "Operazione: Moltiplicazione Scalare [{}]{} su {}",
+                    "Operation: scalar multiplication [{}]{} on {}",
                     k.to_dec_string(),
                     pt_label,
                     curve_eq
                 );
-                println!("Risultato: {}", res_label);
+                println!("Result: {}", res_label);
             }
             0
         }

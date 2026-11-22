@@ -791,21 +791,21 @@ impl U4096 {
     pub fn from_dec(s: &str) -> Result<Self, &'static str> {
         let s = s.trim();
         if s.is_empty() {
-            return Err("Stringa vuota");
+            return Err("Empty string");
         }
         let mut result = Self::ZERO;
         for ch in s.chars() {
             if !ch.is_ascii_digit() {
-                return Err("Carattere decimale non valido");
+                return Err("Invalid decimal digit");
             }
             let digit = (ch as u8 - b'0') as u64;
             let (prod, overflow) = result.mul_u64(10);
             if overflow != 0 {
-                return Err("Overflow oltre 4096 bit");
+                return Err("Overflow beyond 4096 bits");
             }
             let (sum, carry) = prod.add(&Self::from_u64(digit));
             if carry {
-                return Err("Overflow oltre 4096 bit");
+                return Err("Overflow beyond 4096 bits");
             }
             result = sum;
         }
@@ -820,14 +820,14 @@ impl U4096 {
             .or_else(|| s.strip_prefix("0X"))
             .unwrap_or(s);
         if s.is_empty() {
-            return Err("Stringa esadecimale vuota");
+            return Err("Empty hexadecimal string");
         }
         if s.len() > 1024 {
-            return Err("Stringa esadecimale supera 4096 bit (1024 cifre hex)");
+            return Err("Hexadecimal string exceeds 4096 bits (1024 hex digits)");
         }
         let mut result = Self::ZERO;
         for (i, ch) in s.chars().rev().enumerate() {
-            let val = ch.to_digit(16).ok_or("Carattere esadecimale non valido")? as u64;
+            let val = ch.to_digit(16).ok_or("Invalid hexadecimal digit")? as u64;
             let word = i / 16;
             let shift = (i % 16) * 4;
             if word < LIMBS_4096 {

@@ -1128,7 +1128,7 @@ mod tests {
     /// dipende dal fatto che il modulo sia primo. Ignorato perché chiede
     /// secondi: `cargo test --release -- --ignored --nocapture`.
     #[test]
-    #[ignore = "carico a 4096 bit: qualche secondo di esecuzione"]
+    #[ignore = "4096-bit load: a few seconds of execution"]
     fn full_width_4096_bit_workload_is_measured() {
         use crate::primality::is_prime_u4096_with_bases;
         use std::time::Instant;
@@ -1203,9 +1203,11 @@ mod tests {
         let probable = is_prime_u4096_with_bases(&candidate, 4);
         let mr_ms = t_mr.elapsed().as_secs_f64() * 1000.0;
 
-        println!("4096-bit mul_mod      : {mul_nanos:.0} ns per operazione");
-        println!("4096-bit scalar mul   : {scalar_ms:.1} ms per 192 bit di scalare");
-        println!("4096-bit Miller-Rabin : {mr_ms:.1} ms con 4 basi (probable prime = {probable})");
+        println!("4096-bit mul_mod      : {mul_nanos:.0} ns per operation");
+        println!("4096-bit scalar mul   : {scalar_ms:.1} ms for a 192-bit scalar");
+        println!(
+            "4096-bit Miller-Rabin : {mr_ms:.1} ms with 4 bases (probable prime = {probable})"
+        );
     }
 
     /// Fine a 4096 bit veri: cerca un primo a piena larghezza, lo certifica con
@@ -1214,7 +1216,7 @@ mod tests {
     /// la parte costosa: a questa larghezza compare un primo ogni circa 950
     /// candidati dispari. Ignorato perché chiede qualche decina di secondi.
     #[test]
-    #[ignore = "ricerca di un primo a 4096 bit: decine di secondi"]
+    #[ignore = "searching for a 4096-bit prime: tens of seconds"]
     fn full_width_4096_bit_curve_order_is_certified() {
         use crate::primality::{is_prime_u4096, is_prime_u4096_with_bases};
         use std::time::Instant;
@@ -1243,7 +1245,7 @@ mod tests {
 
         let hex = p.to_hex_string();
         println!(
-            "4096-bit prime search : {candidates} candidati in {search_secs:.2} s (p = {}...{})",
+            "4096-bit prime search : {candidates} candidates in {search_secs:.2} s (p = {}...{})",
             &hex[..16],
             &hex[hex.len() - 16..]
         );
@@ -1251,7 +1253,7 @@ mod tests {
         let t_mr = Instant::now();
         let certified = is_prime_u4096(&p);
         let mr_ms = t_mr.elapsed().as_secs_f64() * 1000.0;
-        println!("4096-bit Miller-Rabin : 40 basi in {mr_ms:.1} ms (prime = {certified})");
+        println!("4096-bit Miller-Rabin : 40 bases in {mr_ms:.1} ms (prime = {certified})");
         assert!(certified, "the found prime must pass the 40-base run");
 
         // Famiglia CM in base ai residui del primo trovato.
@@ -1286,7 +1288,7 @@ mod tests {
             );
         }
         println!(
-            "4096-bit curve order  : 2 punti campionati in {sample_ms:.0} ms, [p+1]P = O in {scalars_ms:.0} ms complessivi"
+            "4096-bit curve order  : 2 sampled points in {sample_ms:.0} ms, [p+1]P = O in {scalars_ms:.0} ms total"
         );
     }
 }
